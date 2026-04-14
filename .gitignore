@@ -28,8 +28,10 @@ env/
 .DS_Store
 Thumbs.db
 
-# Ruff
-.ruff_cache/
+# AI/Editor configs
+.qwen/
+.cursor/
+.claude/
 
 # Logs
 *.log
