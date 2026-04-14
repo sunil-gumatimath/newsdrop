@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kill *)",
+      "Bash(sleep *)",
+      "Bash(python3 *)"
+    ]
+  },
+  "$version": 3
+}
