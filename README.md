@@ -47,7 +47,7 @@ Edit `.env` with your credentials:
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 NEWS_API_KEY=your_newsapi_key_here
 DAILY_NEWS_TIME=08:00
-DEFAULT_COUNTRY=us
+DEFAULT_COUNTRY=in
 ```
 
 3. Run with Docker Compose:
@@ -88,7 +88,7 @@ Edit `.env` with your credentials:
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 NEWS_API_KEY=your_newsapi_key_here
 DAILY_NEWS_TIME=08:00
-DEFAULT_COUNTRY=us
+DEFAULT_COUNTRY=in
 ```
 
 4. Run the bot:

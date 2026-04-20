@@ -6,7 +6,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 DAILY_NEWS_TIME = os.getenv("DAILY_NEWS_TIME", "08:00")
-DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "us")
+DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "in")
 
 COUNTRIES = {
     "🇺🇸 United States": "us",

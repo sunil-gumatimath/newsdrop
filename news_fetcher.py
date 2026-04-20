@@ -72,7 +72,7 @@ def _classify_api_error(status_code: int, body: dict) -> str:
     return "⚠️ An unexpected error occurred while fetching news. Please try again later."
 
 
-async def fetch_top_headlines(country: str = "us", category: str = "general") -> dict:
+async def fetch_top_headlines(country: str = "in", category: str = "general") -> dict:
     """Fetch top headlines from NewsAPI with caching."""
     params = {
         "apiKey": NEWS_API_KEY,
@@ -106,7 +106,7 @@ async def fetch_top_headlines(country: str = "us", category: str = "general") ->
         return data
 
 
-async def search_news(query: str, country: str = "us") -> dict:
+async def search_news(query: str, country: str = "in") -> dict:
     """Search for news articles by keyword with caching."""
     params = {
         "apiKey": NEWS_API_KEY,
@@ -172,7 +172,7 @@ def generate_summary(article: dict) -> str:
     return short
 
 
-def format_briefing(data: dict, country: str = "us", category: str = "general") -> str:
+def format_briefing(data: dict, country: str = "in", category: str = "general") -> str:
     """Format news articles into a readable Telegram message."""
     articles = data.get("articles", [])
 
