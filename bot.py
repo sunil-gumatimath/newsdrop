@@ -17,6 +17,9 @@ from config import (
     DEFAULT_COUNTRY,
     COUNTRIES,
     CATEGORIES,
+    BREAKING_NEWS_KEYWORDS,
+    BREAKING_CHECK_INTERVAL_MINUTES,
+    BREAKING_RATE_LIMIT_HOURS,
 )
 from news_fetcher import (
     fetch_top_headlines,
@@ -25,6 +28,9 @@ from news_fetcher import (
     format_search_results,
     get_article_image,
     APIClientError,
+    fetch_breaking_news,
+    fetch_trending_topics,
+    check_api_health,
 )
 from database import (
     load_subscribers,
@@ -33,6 +39,9 @@ from database import (
     is_subscriber,
     get_user_prefs,
     set_user_prefs,
+    get_breaking_news_preference,
+    set_breaking_news_preference,
+    check_db_health,
 )
 from message_utils import send_chunked_message, chunk_message
 
@@ -44,6 +53,9 @@ logger = logging.getLogger(__name__)
 # Rate limiting for search command: {chat_id: last_search_timestamp}
 _search_rate_limit: dict[int, float] = {}
 SEARCH_COOLDOWN_SECONDS = 10
+
+# Rate limiting for breaking news: {chat_id: last_sent_timestamp}
+_breaking_rate_limit: dict[int, float] = {}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,6 +263,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"✅ Category set to <b>{cat.capitalize()}</b>", parse_mode="HTML"
         )
 
+    elif data.startswith("breaking:"):
+        parts = data.split(":")
+        if len(parts) < 2:
+            logger.warning(f"Invalid callback data format: {data}")
+            return
+        enabled = parts[1] == "1"
+        set_breaking_news_preference(chat_id, enabled)
+        status_text = "enabled" if enabled else "disabled"
+        await query.edit_message_text(
+            f"✅ Breaking news alerts <b>{status_text}</b>", parse_mode="HTML"
+        )
+
+    elif data.startswith("search:"):
+        parts = data.split(":")
+        if len(parts) < 2:
+            logger.warning(f"Invalid callback data format: {data}")
+            return
+        topic = parts[1]
+        
+        # Trigger search for the topic
+        status_msg = await query.message.reply_text(f'🔍 Searching for "{topic}"...')
+        
+        try:
+            data_search = await search_news(topic)
+            results = format_search_results(data_search, topic)
+            await status_msg.delete()
+            await send_chunked_message(
+                query.message, results, parse_mode="HTML", disable_web_page_preview=True
+            )
+            # Update rate limit timestamp after successful search
+            _search_rate_limit[chat_id] = context._application._loop.time()
+        except APIClientError as e:
+            logger.error("News API error searching news: %s", e)
+            await status_msg.edit_text(str(e))
+        except Exception as e:
+            logger.error("Unexpected error searching news: %s", e)
+            await status_msg.edit_text(
+                "🔧 An unexpected error occurred. Please try again later."
+            )
+
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -308,9 +360,106 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/setcountry - Choose your news region\n"
         "/setcategory - Choose your news topic\n"
         "/prefs - View your current preferences\n"
+        "/breaking - Toggle breaking news alerts\n"
+        "/trending - View trending topics\n"
+        "/health - Check bot health status\n"
         "/help - Show this help message"
     )
     await update.message.reply_text(help_text, parse_mode="HTML")
+
+
+async def breaking_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    current_enabled = get_breaking_news_preference(chat_id)
+    
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"{'🔔 Turn ON' if not current_enabled else '🔕 Turn OFF'}",
+                    callback_data=f"breaking:{1 if not current_enabled else 0}",
+                )
+            ]
+        ]
+    )
+    
+    status_text = "enabled" if current_enabled else "disabled"
+    await update.message.reply_text(
+        f"🚨 Breaking news alerts are currently <b>{status_text}</b>.\n\n"
+        f"Breaking news will be pushed immediately when important stories are detected.",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    status_msg = await update.message.reply_text("📊 Fetching trending topics...")
+    
+    try:
+        countries = list(COUNTRIES.values())
+        trending_topics = await fetch_trending_topics(countries)
+        
+        await status_msg.delete()
+        
+        if not trending_topics:
+            await update.message.reply_text("No trending topics found at the moment.")
+            return
+        
+        message = "📈 <b>Trending Topics (Global)</b>\n\n"
+        for i, (topic, count) in enumerate(trending_topics.items(), 1):
+            message += f"{i}. <b>{topic.capitalize()}</b> — {count} articles\n"
+        
+        message += "\n💡 Click a topic to search for related news:"
+        
+        keyboard = []
+        for topic in list(trending_topics.keys())[:5]:
+            keyboard.append([InlineKeyboardButton(topic.capitalize(), callback_data=f"search:{topic}")])
+        
+        await update.message.reply_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    except Exception as e:
+        logger.error("Error fetching trending topics: %s", e)
+        await status_msg.edit_text("🔧 Failed to fetch trending topics. Please try again later.")
+
+
+async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    status_msg = await update.message.reply_text("🏥 Checking bot health...")
+    
+    try:
+        # Check API health
+        api_health = await check_api_health()
+        db_health = check_db_health()
+        
+        await status_msg.delete()
+        
+        api_emoji = "✅" if api_health["status"] == "healthy" else "❌"
+        db_emoji = "✅" if db_health["status"] == "healthy" else "❌"
+        
+        message = (
+            f"🏥 <b>Bot Health Status</b>\n\n"
+            f"{api_emoji} NewsAPI: {api_health['status']}"
+        )
+        
+        if api_health["status"] == "healthy":
+            message += f" ({api_health.get('response_time', 'N/A')})"
+        else:
+            message += f"\n   Error: {api_health.get('error', 'Unknown')}"
+        
+        message += f"\n{db_emoji} Database: {db_health['status']}"
+        
+        if db_health["status"] == "healthy":
+            message += f"\n   Subscribers: {db_health.get('subscriber_count', '0')}"
+        else:
+            message += f"\n   Error: {db_health.get('error', 'Unknown')}"
+        
+        message += f"\n\n📊 Cache: Active (5min TTL)\n"
+        message += f"🤖 Bot: Running"
+        
+        await update.message.reply_text(message, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error("Error checking health: %s", e)
+        await status_msg.edit_text("🔧 Failed to check health status.")
 
 
 async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -407,6 +556,116 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error("Failed to send news to %s: %s", chat_id, e)
 
 
+async def send_breaking_news(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check for breaking news and send to opted-in users."""
+    subscribers = load_subscribers()
+    if not subscribers:
+        logger.info("No subscribers to check for breaking news.")
+        return
+
+    # Filter users who have breaking news enabled
+    breaking_enabled_users = []
+    for chat_id in subscribers:
+        if get_breaking_news_preference(chat_id):
+            breaking_enabled_users.append(chat_id)
+    
+    if not breaking_enabled_users:
+        logger.info("No users with breaking news enabled.")
+        return
+
+    logger.info(f"Checking breaking news for {len(breaking_enabled_users)} users...")
+
+    try:
+        countries = list(COUNTRIES.values())
+        breaking_articles = await fetch_breaking_news(countries, BREAKING_NEWS_KEYWORDS)
+        
+        if not breaking_articles:
+            logger.info("No breaking news found.")
+            return
+
+        # Deduplicate articles by URL
+        seen_urls = set()
+        unique_articles = []
+        for article in breaking_articles:
+            url = article.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                unique_articles.append(article)
+        
+        if not unique_articles:
+            logger.info("No unique breaking news articles.")
+            return
+
+        logger.info(f"Found {len(unique_articles)} breaking news articles.")
+
+        for chat_id in breaking_enabled_users:
+            # Check rate limit
+            current_time = context._application._loop.time()
+            last_sent = _breaking_rate_limit.get(chat_id, 0)
+            rate_limit_seconds = BREAKING_RATE_LIMIT_HOURS * 3600
+            
+            if current_time - last_sent < rate_limit_seconds:
+                continue
+
+            try:
+                for article in unique_articles[:3]:  # Send max 3 breaking articles
+                    title = article.get("title", "No title")
+                    url = article.get("url", "")
+                    description = article.get("description", "")
+                    source = article.get("source", {}).get("name", "Unknown")
+                    country = article.get("country", "us").upper()
+                    image_url = get_article_image(article)
+
+                    caption = (
+                        f"🚨 <b>BREAKING NEWS</b> ({country})\n\n"
+                        f"<b>{title}</b>\n"
+                        f"<i>{(description[:150] + '...') if description and len(description) > 150 else description}</i>\n"
+                        f"📍 {source}"
+                    )
+
+                    keyboard = (
+                        InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("📖 Read full article", url=url)]]
+                        )
+                        if url
+                        else None
+                    )
+
+                    try:
+                        if image_url:
+                            await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=image_url,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=keyboard,
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=caption,
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=keyboard,
+                            )
+                    except Exception:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=keyboard,
+                        )
+
+                # Update rate limit
+                _breaking_rate_limit[chat_id] = current_time
+                logger.info("Sent breaking news to %s", chat_id)
+
+            except Exception as e:
+                logger.error("Failed to send breaking news to %s: %s", chat_id, e)
+
+    except Exception as e:
+        logger.error("Error fetching breaking news: %s", e)
+
+
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
@@ -425,6 +684,9 @@ def main() -> None:
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("prefs", preferences))
+    app.add_handler(CommandHandler("breaking", breaking_toggle))
+    app.add_handler(CommandHandler("trending", trending))
+    app.add_handler(CommandHandler("health", health))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_handler))
 
@@ -438,6 +700,9 @@ def main() -> None:
         BotCommand("setcountry", "Choose your news region"),
         BotCommand("setcategory", "Choose your news topic"),
         BotCommand("prefs", "View your preferences"),
+        BotCommand("breaking", "Toggle breaking news alerts"),
+        BotCommand("trending", "View trending topics"),
+        BotCommand("health", "Check bot health status"),
         BotCommand("help", "Show all commands"),
     ]
 
@@ -448,6 +713,14 @@ def main() -> None:
 
     app.job_queue.run_daily(send_daily_news, time=daily_time)
     logger.info(f"Daily news scheduled for {DAILY_NEWS_TIME}")
+
+    # Schedule breaking news check every 30 minutes
+    app.job_queue.run_repeating(
+        send_breaking_news,
+        interval=60 * BREAKING_CHECK_INTERVAL_MINUTES,
+        first=10,  # Start 10 seconds after bot starts
+    )
+    logger.info(f"Breaking news check scheduled every {BREAKING_CHECK_INTERVAL_MINUTES} minutes")
 
     logger.info("Bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

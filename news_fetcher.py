@@ -238,3 +238,157 @@ def get_article_image(article: dict) -> str | None:
     if url and not url.endswith("null"):
         return url
     return None
+
+
+async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list[dict]:
+    """Fetch breaking news from multiple countries based on keywords."""
+    breaking_articles = []
+    
+    for country in countries:
+        params = {
+            "apiKey": NEWS_API_KEY,
+            "country": country,
+            "pageSize": 20,
+        }
+        
+        cache_key = _get_cache_key(params)
+        cached = _get_from_cache(cache_key)
+        if cached:
+            articles = cached.get("articles", [])
+        else:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(NEWS_API_URL, params=params)
+                try:
+                    data = response.json()
+                except Exception:
+                    continue
+                
+                if response.status_code == 200 and data.get("status") != "error":
+                    _set_cache(cache_key, data)
+                    articles = data.get("articles", [])
+                else:
+                    continue
+        
+        # Filter articles by keywords
+        for article in articles:
+            title = article.get("title", "").lower()
+            description = article.get("description", "").lower()
+            combined = title + " " + description
+            
+            if any(keyword.lower() in combined for keyword in keywords):
+                article["country"] = country
+                breaking_articles.append(article)
+    
+    return breaking_articles
+
+
+def extract_keywords(text: str) -> list[str]:
+    """Extract meaningful keywords from text, filtering common words."""
+    common_words = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "from", "as", "is", "was", "are", "were", "be",
+        "been", "being", "have", "has", "had", "do", "does", "did", "will",
+        "would", "could", "should", "may", "might", "must", "shall", "can",
+        "this", "that", "these", "those", "it", "its", "they", "them", "their",
+        "he", "him", "his", "she", "her", "hers", "we", "us", "our", "you",
+        "your", "i", "me", "my", "what", "which", "who", "whom", "when",
+        "where", "why", "how", "if", "then", "else", "while", "after", "before",
+        "between", "into", "through", "during", "until", "against", "without",
+        "within", "upon", "about", "above", "below", "over", "under", "again",
+        "further", "once", "here", "there", "all", "any", "both", "each",
+        "few", "more", "most", "other", "some", "such", "no", "nor", "not",
+        "only", "own", "same", "so", "than", "too", "very", "just", "now",
+        "says", "said", "new", "news", "report", "reports", "update", "updates"
+    }
+    
+    # Clean and tokenize
+    words = text.lower().replace("-", " ").replace("'", " ").split()
+    # Filter common words and short words
+    keywords = [word for word in words if len(word) > 2 and word not in common_words]
+    return keywords
+
+
+async def fetch_trending_topics(countries: list[str]) -> dict[str, int]:
+    """Fetch trending topics across multiple countries."""
+    keyword_counts = {}
+    
+    for country in countries:
+        params = {
+            "apiKey": NEWS_API_KEY,
+            "country": country,
+            "pageSize": 20,
+        }
+        
+        cache_key = _get_cache_key(params)
+        cached = _get_from_cache(cache_key)
+        if cached:
+            articles = cached.get("articles", [])
+        else:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(NEWS_API_URL, params=params)
+                try:
+                    data = response.json()
+                except Exception:
+                    continue
+                
+                if response.status_code == 200 and data.get("status") != "error":
+                    _set_cache(cache_key, data)
+                    articles = data.get("articles", [])
+                else:
+                    continue
+        
+        # Extract keywords from titles
+        for article in articles:
+            title = article.get("title", "")
+            keywords = extract_keywords(title)
+            for keyword in keywords:
+                keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
+    
+    # Sort by count and return top 10
+    sorted_topics = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)
+    return dict(sorted_topics[:10])
+
+
+async def check_api_health() -> dict[str, str]:
+    """Check NewsAPI health by making a test request."""
+    params = {
+        "apiKey": NEWS_API_KEY,
+        "country": "us",
+        "pageSize": 1,
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(NEWS_API_URL, params=params, timeout=10.0)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "error":
+                    return {
+                        "status": "unhealthy",
+                        "error": f"API error: {data.get('message', 'Unknown error')}",
+                    }
+                return {
+                    "status": "healthy",
+                    "response_time": f"{response.elapsed.total_seconds():.2f}s",
+                }
+            elif response.status_code == 401:
+                return {
+                    "status": "unhealthy",
+                    "error": "Invalid API key",
+                }
+            elif response.status_code == 429:
+                return {
+                    "status": "unhealthy",
+                    "error": "Rate limit exceeded",
+                }
+            else:
+                return {
+                    "status": "unhealthy",
+                    "error": f"HTTP {response.status_code}",
+                }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+        }
