@@ -32,7 +32,7 @@ def _init_db() -> None:
 
                 CREATE TABLE IF NOT EXISTS user_preferences (
                     chat_id INTEGER PRIMARY KEY,
-                    country TEXT NOT NULL DEFAULT 'us',
+                    country TEXT NOT NULL DEFAULT 'in',
                     category TEXT NOT NULL DEFAULT 'general',
                     breaking_news_enabled INTEGER NOT NULL DEFAULT 0
                 );
@@ -112,7 +112,7 @@ def is_subscriber(chat_id: int) -> bool:
 # ── User Preferences ─────────────────────────────────────────────────
 
 def get_user_prefs(
-    chat_id: int, default_country: str = "us"
+    chat_id: int, default_country: str = "in"
 ) -> dict[str, str]:
     with _lock:
         conn = _get_connection()
@@ -146,7 +146,7 @@ def set_user_prefs(
             if row:
                 current = {"country": row[0], "category": row[1]}
             else:
-                current = {"country": "us", "category": "general"}
+                current = {"country": "in", "category": "general"}
 
             if country is not None:
                 current["country"] = country

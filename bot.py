@@ -437,7 +437,7 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         message = (
             f"🏥 <b>Bot Health Status</b>\n\n"
-            f"{api_emoji} NewsAPI: {api_health['status']}"
+            f"{api_emoji} NewsData.io: {api_health['status']}"
         )
         
         if api_health["status"] == "healthy":

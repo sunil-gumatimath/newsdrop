@@ -19,6 +19,7 @@ COPY config.py .
 COPY database.py .
 COPY news_fetcher.py .
 COPY message_utils.py .
+COPY rss_feeds.py .
 
 # Create directory for database
 RUN mkdir -p /app/data
