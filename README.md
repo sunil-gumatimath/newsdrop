@@ -15,6 +15,9 @@ Your personalized daily news briefing, delivered straight to Telegram.
 - **Relative Timestamps** - See when articles were published ("2h ago", "30m ago")
 - **Subscription Management** - Easy subscribe/unsubscribe commands
 - **SQLite Backend** - Thread-safe concurrent storage for user data
+- **Breaking News Alerts** - Get instant notifications for urgent stories (opt-in)
+- **Trending Topics** - Discover what's trending globally across all regions
+- **Health Monitoring** - Check bot status and API health anytime
 
 ## Setup
 
@@ -25,6 +28,44 @@ Your personalized daily news briefing, delivered straight to Telegram.
 - A NewsAPI Key ([newsapi.org](https://newsapi.org))
 
 ### Installation
+
+#### Option 1: Docker (Recommended)
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/newsdrop.git
+cd newsdrop
+```
+
+2. Configure environment variables:
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your credentials:
+```env
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+NEWS_API_KEY=your_newsapi_key_here
+DAILY_NEWS_TIME=08:00
+DEFAULT_COUNTRY=us
+```
+
+3. Run with Docker Compose:
+```bash
+docker-compose up -d
+```
+
+To view logs:
+```bash
+docker-compose logs -f
+```
+
+To stop the bot:
+```bash
+docker-compose down
+```
+
+#### Option 2: Local Installation
 
 1. Clone the repository:
 ```bash
@@ -67,6 +108,9 @@ python bot.py
 | `/setcountry` | Choose your news region |
 | `/setcategory` | Choose your news topic |
 | `/prefs` | View your preferences |
+| `/breaking` | Toggle breaking news alerts |
+| `/trending` | View trending topics |
+| `/health` | Check bot health status |
 | `/help` | Show all commands |
 
 ## Supported Regions
