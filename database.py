@@ -34,12 +34,20 @@ def _init_db() -> None:
                     chat_id INTEGER PRIMARY KEY,
                     country TEXT NOT NULL DEFAULT 'us',
                     category TEXT NOT NULL DEFAULT 'general',
-                    FOREIGN KEY (chat_id) REFERENCES subscribers(chat_id)
-                        ON DELETE CASCADE
+                    breaking_news_enabled INTEGER NOT NULL DEFAULT 0
                 );
                 """
             )
             conn.commit()
+            
+            # Migration: Add breaking_news_enabled column if it doesn't exist
+            cursor = conn.execute("PRAGMA table_info(user_preferences)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "breaking_news_enabled" not in columns:
+                conn.execute(
+                    "ALTER TABLE user_preferences ADD COLUMN breaking_news_enabled INTEGER NOT NULL DEFAULT 0"
+                )
+                conn.commit()
         finally:
             conn.close()
 
@@ -157,5 +165,66 @@ def set_user_prefs(
             )
             conn.commit()
             return current
+        finally:
+            conn.close()
+
+
+def get_breaking_news_preference(chat_id: int) -> bool:
+    """Get breaking news preference for a user."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                "SELECT breaking_news_enabled FROM user_preferences WHERE chat_id = ?",
+                (chat_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return bool(row[0])
+            return False
+        finally:
+            conn.close()
+
+
+def set_breaking_news_preference(chat_id: int, enabled: bool) -> None:
+    """Set breaking news preference for a user."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO user_preferences (chat_id, breaking_news_enabled)
+                VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    breaking_news_enabled = excluded.breaking_news_enabled
+                """,
+                (chat_id, 1 if enabled else 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def check_db_health() -> dict[str, str]:
+    """Check database health and return status information."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute("SELECT 1")
+            cursor.fetchone()
+            
+            # Get subscriber count
+            cursor = conn.execute("SELECT COUNT(*) FROM subscribers")
+            sub_count = cursor.fetchone()[0]
+            
+            return {
+                "status": "healthy",
+                "subscriber_count": str(sub_count),
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+            }
         finally:
             conn.close()

@@ -33,3 +33,16 @@ CATEGORIES = [
 
 NEWS_API_URL = "https://newsapi.org/v2/top-headlines"
 NEWS_SEARCH_URL = "https://newsapi.org/v2/everything"
+
+BREAKING_NEWS_KEYWORDS = [
+    "breaking",
+    "urgent",
+    "alert",
+    "emergency",
+    "critical",
+    "developing",
+    "just in",
+]
+
+BREAKING_CHECK_INTERVAL_MINUTES = 30
+BREAKING_RATE_LIMIT_HOURS = 1
