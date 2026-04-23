@@ -38,6 +38,9 @@ from database import (
     load_subscribers,
     remove_subscriber,
     set_user_prefs,
+    get_breaking_news_preference,
+    set_breaking_news_preference,
+    check_db_health,
 )
 from message_utils import send_chunked_message
 from news_fetcher import (
@@ -60,6 +63,9 @@ Prefs = dict[str, str]
 
 _search_rate_limit: SearchRateLimit = {}
 SEARCH_COOLDOWN_SECONDS = 10
+
+# Rate limiting for breaking news: {chat_id: last_sent_timestamp}
+_breaking_rate_limit: dict[int, float] = {}
 
 
 class ReplyTarget(Protocol):
@@ -473,6 +479,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.warning("Unhandled callback action: %s", action)
     _ = await query.edit_message_text("⚠️ Unsupported action.")
 
+    elif data.startswith("breaking:"):
+        parts = data.split(":")
+        if len(parts) < 2:
+            logger.warning(f"Invalid callback data format: {data}")
+            return
+        enabled = parts[1] == "1"
+        set_breaking_news_preference(chat_id, enabled)
+        status_text = "enabled" if enabled else "disabled"
+        await query.edit_message_text(
+            f"✅ Breaking news alerts <b>{status_text}</b>", parse_mode="HTML"
+        )
+
+    elif data.startswith("search:"):
+        parts = data.split(":")
+        if len(parts) < 2:
+            logger.warning(f"Invalid callback data format: {data}")
+            return
+        topic = parts[1]
+        
+        # Trigger search for the topic
+        status_msg = await query.message.reply_text(f'🔍 Searching for "{topic}"...')
+        
+        try:
+            data_search = await search_news(topic)
+            results = format_search_results(data_search, topic)
+            await status_msg.delete()
+            await send_chunked_message(
+                query.message, results, parse_mode="HTML", disable_web_page_preview=True
+            )
+            # Update rate limit timestamp after successful search
+            _search_rate_limit[chat_id] = context._application._loop.time()
+        except APIClientError as e:
+            logger.error("News API error searching news: %s", e)
+            await status_msg.edit_text(str(e))
+        except Exception as e:
+            logger.error("Unexpected error searching news: %s", e)
+            await status_msg.edit_text(
+                "🔧 An unexpected error occurred. Please try again later."
+            )
+
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
@@ -557,9 +603,106 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/setcountry - Choose your news region\n"
         "/setcategory - Choose your news topic\n"
         "/prefs - View your current preferences\n"
+        "/breaking - Toggle breaking news alerts\n"
+        "/trending - View trending topics\n"
+        "/health - Check bot health status\n"
         "/help - Show this help message"
     )
     _ = await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+
+
+async def breaking_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    current_enabled = get_breaking_news_preference(chat_id)
+    
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"{'🔔 Turn ON' if not current_enabled else '🔕 Turn OFF'}",
+                    callback_data=f"breaking:{1 if not current_enabled else 0}",
+                )
+            ]
+        ]
+    )
+    
+    status_text = "enabled" if current_enabled else "disabled"
+    await update.message.reply_text(
+        f"🚨 Breaking news alerts are currently <b>{status_text}</b>.\n\n"
+        f"Breaking news will be pushed immediately when important stories are detected.",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    status_msg = await update.message.reply_text("📊 Fetching trending topics...")
+    
+    try:
+        countries = list(COUNTRIES.values())
+        trending_topics = await fetch_trending_topics(countries)
+        
+        await status_msg.delete()
+        
+        if not trending_topics:
+            await update.message.reply_text("No trending topics found at the moment.")
+            return
+        
+        message = "📈 <b>Trending Topics (Global)</b>\n\n"
+        for i, (topic, count) in enumerate(trending_topics.items(), 1):
+            message += f"{i}. <b>{topic.capitalize()}</b> — {count} articles\n"
+        
+        message += "\n💡 Click a topic to search for related news:"
+        
+        keyboard = []
+        for topic in list(trending_topics.keys())[:5]:
+            keyboard.append([InlineKeyboardButton(topic.capitalize(), callback_data=f"search:{topic}")])
+        
+        await update.message.reply_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    except Exception as e:
+        logger.error("Error fetching trending topics: %s", e)
+        await status_msg.edit_text("🔧 Failed to fetch trending topics. Please try again later.")
+
+
+async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    status_msg = await update.message.reply_text("🏥 Checking bot health...")
+    
+    try:
+        # Check API health
+        api_health = await check_api_health()
+        db_health = check_db_health()
+        
+        await status_msg.delete()
+        
+        api_emoji = "✅" if api_health["status"] == "healthy" else "❌"
+        db_emoji = "✅" if db_health["status"] == "healthy" else "❌"
+        
+        message = (
+            f"🏥 <b>Bot Health Status</b>\n\n"
+            f"{api_emoji} NewsData.io: {api_health['status']}"
+        )
+        
+        if api_health["status"] == "healthy":
+            message += f" ({api_health.get('response_time', 'N/A')})"
+        else:
+            message += f"\n   Error: {api_health.get('error', 'Unknown')}"
+        
+        message += f"\n{db_emoji} Database: {db_health['status']}"
+        
+        if db_health["status"] == "healthy":
+            message += f"\n   Subscribers: {db_health.get('subscriber_count', '0')}"
+        else:
+            message += f"\n   Error: {db_health.get('error', 'Unknown')}"
+        
+        message += f"\n\n📊 Cache: Active (5min TTL)\n"
+        message += f"🤖 Bot: Running"
+        
+        await update.message.reply_text(message, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error("Error checking health: %s", e)
+        await status_msg.edit_text("🔧 Failed to check health status.")
 
 
 async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -634,6 +777,9 @@ async def _setup_commands(
         BotCommand("setcountry", "Choose your news region"),
         BotCommand("setcategory", "Choose your news topic"),
         BotCommand("prefs", "View your preferences"),
+        BotCommand("breaking", "Toggle breaking news alerts"),
+        BotCommand("trending", "View trending topics"),
+        BotCommand("health", "Check bot health status"),
         BotCommand("help", "Show all commands"),
     ]
     await application.bot.set_my_commands(commands)
