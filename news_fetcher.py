@@ -1,14 +1,18 @@
 # pyright: reportMissingImports=false
 from __future__ import annotations
 
+import asyncio
 import html
-from datetime import datetime
+import logging
+import re
+from datetime import date, datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
-from config import NEWS_API_KEY
+from config import DAILY_REQUEST_LIMIT, ENABLE_RSS, NEWS_API_KEY
+from rss_feeds import fetch_rss_articles, has_rss_for
 
 Article = dict[str, Any]
 NewsResponse = dict[str, Any]
@@ -31,6 +35,197 @@ CATEGORY_MAP = {
     "science": "science",
 }
 
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+_CATEGORY_KEYWORDS = {
+    "technology": [
+        "tech",
+        "technology",
+        "software",
+        "hardware",
+        "ai",
+        "artificial intelligence",
+        "machine learning",
+        "cyber",
+        "digital",
+        "app",
+        "application",
+        "startup",
+        "gadget",
+        "device",
+        "internet",
+        "cloud",
+        "data",
+        "algorithm",
+        "coding",
+        "programming",
+        "developer",
+        "innovation",
+        "robot",
+        "automation",
+        "crypto",
+        "blockchain",
+        "5g",
+        "wireless",
+        "computing",
+        "chip",
+        "semiconductor",
+    ],
+    "business": [
+        "business",
+        "economy",
+        "market",
+        "stock",
+        "finance",
+        "economic",
+        "company",
+        "corporate",
+        "industry",
+        "trade",
+        "investment",
+        "investor",
+        "bank",
+        "banking",
+        "fund",
+        "revenue",
+        "profit",
+        "merger",
+        "acquisition",
+        "ipo",
+        "startup",
+        "entrepreneur",
+        "ceo",
+        "executive",
+        "commercial",
+        "retail",
+        "sales",
+    ],
+    "sports": [
+        "sport",
+        "game",
+        "match",
+        "tournament",
+        "championship",
+        "league",
+        "team",
+        "player",
+        "coach",
+        "athlete",
+        "football",
+        "soccer",
+        "cricket",
+        "basketball",
+        "tennis",
+        "hockey",
+        "baseball",
+        "rugby",
+        "olympic",
+        "race",
+        "win",
+        "score",
+        "goal",
+        "medal",
+        "cup",
+        "final",
+        "semi-final",
+        "victory",
+        "defeat",
+    ],
+    "entertainment": [
+        "movie",
+        "film",
+        "actor",
+        "actress",
+        "celebrity",
+        "music",
+        "song",
+        "album",
+        "concert",
+        "artist",
+        "band",
+        "hollywood",
+        "bollywood",
+        "tv",
+        "television",
+        "show",
+        "series",
+        "netflix",
+        "streaming",
+        "theater",
+        "cinema",
+        "award",
+        "oscar",
+        "grammy",
+        "festival",
+        "entertainment",
+        "celeb",
+        "star",
+    ],
+    "health": [
+        "health",
+        "medical",
+        "doctor",
+        "hospital",
+        "disease",
+        "virus",
+        "covid",
+        "vaccine",
+        "treatment",
+        "medicine",
+        "drug",
+        "patient",
+        "healthcare",
+        "wellness",
+        "fitness",
+        "exercise",
+        "diet",
+        "nutrition",
+        "mental health",
+        "pandemic",
+        "symptom",
+        "cure",
+        "research",
+        "clinical",
+        "pharmaceutical",
+        "surgery",
+    ],
+    "science": [
+        "science",
+        "scientific",
+        "research",
+        "study",
+        "scientist",
+        "discovery",
+        "space",
+        "nasa",
+        "astronomy",
+        "physics",
+        "chemistry",
+        "biology",
+        "nature",
+        "climate",
+        "environment",
+        "earth",
+        "planet",
+        "universe",
+        "galaxy",
+        "energy",
+        "experiment",
+        "laboratory",
+        "innovation",
+        "breakthrough",
+        "genetic",
+        "dna",
+    ],
+}
+
+logger = logging.getLogger(__name__)
+
+# Daily API request tracking for free-tier protection
+_daily_request_count = 0
+_daily_request_date = date.today()
+_request_limit = DAILY_REQUEST_LIMIT if DAILY_REQUEST_LIMIT > 0 else 200
+
 
 class APIClientError(Exception):
     """Custom exception for NewsData.io errors with structured info."""
@@ -49,16 +244,48 @@ class APIClientError(Exception):
         self.api_code = api_code
 
 
+def _check_rate_limit() -> bool:
+    """Check whether another API request may be made today."""
+    global _daily_request_count, _daily_request_date
+
+    today = date.today()
+    if today != _daily_request_date:
+        _daily_request_count = 0
+        _daily_request_date = today
+
+    return _daily_request_count < _request_limit
+
+
+def _increment_request_count() -> None:
+    global _daily_request_count
+    _daily_request_count += 1
+
+
+def get_request_count() -> tuple[int, int]:
+    """Return current daily request usage and limit."""
+    global _daily_request_count, _daily_request_date
+
+    today = date.today()
+    if today != _daily_request_date:
+        _daily_request_count = 0
+        _daily_request_date = today
+
+    return _daily_request_count, _request_limit
+
+
 def format_relative_time(published_at: str) -> str:
     if not published_at:
         return ""
     try:
         normalized = (
             published_at.replace("Z", "+00:00")
-            if "T" in published_at
+            if "T" in published_at or published_at.endswith("Z")
             else published_at.replace(" ", "T") + "+00:00"
         )
         pub_time = datetime.fromisoformat(normalized)
+        if pub_time.tzinfo is None:
+            pub_time = pub_time.replace(tzinfo=timezone.utc)
+
         now = datetime.now(pub_time.tzinfo)
         delta = now - pub_time
         total_seconds = int(delta.total_seconds())
@@ -66,28 +293,23 @@ def format_relative_time(published_at: str) -> str:
         if total_seconds < 60:
             return "just now"
         if total_seconds < 3600:
-            mins = total_seconds // 60
-            return f"{mins}m ago"
+            return f"{total_seconds // 60}m ago"
         if total_seconds < 86400:
-            hours = total_seconds // 3600
-            return f"{hours}h ago"
+            return f"{total_seconds // 3600}h ago"
         if total_seconds < 172800:
             return "yesterday"
-        days = total_seconds // 86400
-        return f"{days}d ago"
+        return f"{total_seconds // 86400}d ago"
     except Exception:
         return ""
 
 
 def _escape_text(value: object) -> str:
-    """Escape text for Telegram HTML parse mode."""
     if value is None:
         return ""
     return html.escape(str(value), quote=True)
 
 
 def _safe_url(url: object) -> str:
-    """Return a Telegram-safe http/https URL or an empty string."""
     if not isinstance(url, str):
         return ""
 
@@ -146,7 +368,6 @@ def _set_cache(key: str, data: NewsResponse) -> None:
 
 
 def _classify_api_error(status_code: int, body: NewsResponse) -> str:
-    """Return a user-friendly error message based on HTTP status and API response."""
     status = str(body.get("status", "")).lower()
     results = body.get("results")
     result_code = str(body.get("code", ""))
@@ -218,6 +439,15 @@ async def _fetch_news(params: Params) -> NewsResponse:
     if cached is not None:
         return cached
 
+    if not _check_rate_limit():
+        current, limit = get_request_count()
+        raise APIClientError(
+            f"Daily API request limit reached ({current}/{limit}). "
+            "Please try again tomorrow or disable RSS fallback if needed.",
+            status_code=429,
+            api_code="RateLimitExceeded",
+        )
+
     timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
@@ -255,38 +485,177 @@ async def _fetch_news(params: Params) -> NewsResponse:
 
         normalized = _normalize_response(data)
         _set_cache(cache_key, normalized)
+        _increment_request_count()
         return normalized
+
+
+def _normalize_title(title: str) -> str:
+    if not title:
+        return ""
+    return " ".join(_WORD_RE.findall(title.lower()))
+
+
+def _merge_and_dedupe(*sources: list[Article], limit: int = 10) -> list[Article]:
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+    merged: list[Article] = []
+
+    for source in sources:
+        for article in source:
+            url = str(article.get("url", "")).strip()
+            title_key = _normalize_title(str(article.get("title", "")))
+
+            if url and url in seen_urls:
+                continue
+            if title_key and title_key in seen_titles:
+                continue
+
+            if url:
+                seen_urls.add(url)
+            if title_key:
+                seen_titles.add(title_key)
+
+            merged.append(article)
+
+    merged.sort(key=lambda a: str(a.get("publishedAt", "") or ""), reverse=True)
+    return merged[:limit]
+
+
+async def _safe_fetch_rss(country: str, limit: int = 20) -> list[Article]:
+    if not ENABLE_RSS or not has_rss_for(country):
+        return []
+    try:
+        return await fetch_rss_articles(country, limit=limit)
+    except Exception as exc:
+        logger.warning("RSS fetch failed for %s: %s", country, exc)
+        return []
+
+
+def _filter_by_query(articles: list[Article], query: str) -> list[Article]:
+    q = query.lower().strip()
+    if not q:
+        return articles
+
+    result: list[Article] = []
+    for article in articles:
+        blob = f"{article.get('title', '')} {article.get('description', '')}"
+        if q in blob.lower():
+            result.append(article)
+    return result
+
+
+def _filter_by_category(articles: list[Article], category: str) -> list[Article]:
+    if category == "general" or category not in _CATEGORY_KEYWORDS:
+        return articles
+
+    keywords = _CATEGORY_KEYWORDS[category]
+    min_matches = 1 if category == "sports" else 2
+
+    filtered: list[Article] = []
+    for article in articles:
+        title = str(article.get("title", "")).lower()
+        description = str(article.get("description", "")).lower()
+        blob = f"{title} {description}"
+        match_count = sum(1 for keyword in keywords if keyword in blob)
+
+        if match_count >= min_matches:
+            filtered.append(article)
+
+    return filtered
 
 
 async def fetch_top_headlines(
     country: str = "us",
     category: str = "general",
 ) -> NewsResponse:
-    """Fetch top headlines from NewsData.io with caching."""
     mapped_category = CATEGORY_MAP.get(category, category)
     params: Params = {
         "apikey": NEWS_API_KEY or "",
         "country": country,
-        "category": mapped_category,
         "language": "en",
         "size": 10,
     }
-    return await _fetch_news(params)
+
+    if mapped_category and mapped_category != "top":
+        params["category"] = mapped_category
+
+    api_task = _fetch_news(params)
+    rss_task = _safe_fetch_rss(country, limit=20)
+
+    api_data: NewsResponse | None = None
+    api_error: Exception | None = None
+
+    try:
+        api_data, rss_articles = await asyncio.gather(api_task, rss_task)
+    except Exception:
+        try:
+            api_data = await api_task
+        except Exception as exc:
+            api_error = exc
+            logger.warning("NewsData.io fetch failed, will try RSS: %s", exc)
+        rss_articles = await rss_task
+    else:
+        api_error = None
+
+    rss_articles = _filter_by_category(rss_articles, category)
+    api_articles = (api_data or {}).get("articles", [])
+    api_articles = api_articles if isinstance(api_articles, list) else []
+
+    if not api_articles and not rss_articles and api_error is not None:
+        raise api_error
+
+    merged = _merge_and_dedupe(api_articles, rss_articles, limit=10)
+
+    sources_used: list[str] = []
+    if api_articles:
+        sources_used.append("newsdata.io")
+    if rss_articles:
+        sources_used.append("rss")
+
+    return {
+        "status": "ok",
+        "totalResults": len(merged),
+        "articles": merged,
+        "sources": sources_used,
+    }
 
 
-async def search_news(query: str) -> NewsResponse:
-    """Search for news articles by keyword using NewsData.io."""
+async def search_news(query: str, country: str = "us") -> NewsResponse:
     params: Params = {
         "apikey": NEWS_API_KEY or "",
         "q": query,
         "language": "en",
         "size": 10,
     }
-    return await _fetch_news(params)
+
+    api_data: NewsResponse | None = None
+    api_error: Exception | None = None
+
+    try:
+        api_data = await _fetch_news(params)
+    except Exception as exc:
+        api_error = exc
+        logger.warning("NewsData.io search failed, will try RSS: %s", exc)
+
+    rss_articles = await _safe_fetch_rss(country, limit=50)
+    rss_articles = _filter_by_query(rss_articles, query)
+
+    api_articles = (api_data or {}).get("articles", [])
+    api_articles = api_articles if isinstance(api_articles, list) else []
+
+    if not api_articles and not rss_articles and api_error is not None:
+        raise api_error
+
+    merged = _merge_and_dedupe(api_articles, rss_articles, limit=10)
+
+    return {
+        "status": "ok",
+        "totalResults": len(merged),
+        "articles": merged,
+    }
 
 
 def generate_summary(article: Article) -> str:
-    """Generate a short escaped summary of an article."""
     title = str(article.get("title", "No title"))
     description = article.get("description", "")
     content = article.get("content", "")
@@ -306,7 +675,6 @@ def format_briefing(
     country: str = "us",
     category: str = "general",
 ) -> str:
-    """Format news articles into a readable Telegram-safe message."""
     raw_articles = data.get("articles", [])
     articles: list[Article] = raw_articles if isinstance(raw_articles, list) else []
 
@@ -356,7 +724,6 @@ def format_briefing(
 
 
 def format_search_results(data: NewsResponse, query: str) -> str:
-    """Format search results into a readable Telegram-safe message."""
     raw_articles = data.get("articles", [])
     articles: list[Article] = raw_articles if isinstance(raw_articles, list) else []
 
@@ -386,22 +753,20 @@ def format_search_results(data: NewsResponse, query: str) -> str:
 
 
 def get_article_image(article: Article) -> str | None:
-    """Extract a safe image URL from article if available."""
     url = _safe_url(article.get("urlToImage", ""))
     if url and not url.endswith("null"):
         return url
     return None
 
 
-async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list[dict]:
-    """Fetch breaking news from multiple countries based on keywords."""
-    breaking_articles = []
+async def fetch_breaking_news(
+    countries: list[str], keywords: list[str]
+) -> list[Article]:
+    breaking_articles: list[Article] = []
 
-    # Note: NewsData.io free tier caps `size` at 10 per request, so we fetch
-    # 10 articles per country here (was 20 on the old NewsAPI.org free tier).
     for country in countries:
-        params = {
-            "apikey": NEWS_API_KEY,
+        params: Params = {
+            "apikey": NEWS_API_KEY or "",
             "country": country,
             "language": "en",
             "size": 10,
@@ -410,40 +775,30 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
         cache_key = _get_cache_key(params)
         cached = _get_from_cache(cache_key)
         if cached:
-            articles = cached.get("articles", [])
+            raw_articles = cached.get("articles", [])
+            articles = raw_articles if isinstance(raw_articles, list) else []
         else:
             try:
-                async with httpx.AsyncClient(timeout=20.0) as client:
-                    response = await client.get(NEWS_LATEST_URL, params=params)
-                    try:
-                        data = response.json()
-                    except Exception:
-                        continue
-
-                    if response.status_code == 200 and data.get("status") != "error":
-                        normalized = _normalize_response(data)
-                        _set_cache(cache_key, normalized)
-                        articles = normalized.get("articles", [])
-                    else:
-                        continue
+                data = await _fetch_news(params)
+                raw_articles = data.get("articles", [])
+                articles = raw_articles if isinstance(raw_articles, list) else []
             except Exception:
                 continue
 
-        # Filter articles by keywords
         for article in articles:
-            title = (article.get("title") or "").lower()
-            description = (article.get("description") or "").lower()
-            combined = title + " " + description
+            title = str(article.get("title", "")).lower()
+            description = str(article.get("description", "")).lower()
+            combined = f"{title} {description}"
 
             if any(keyword.lower() in combined for keyword in keywords):
-                article["country"] = country
-                breaking_articles.append(article)
+                tagged = dict(article)
+                tagged["country"] = country
+                breaking_articles.append(tagged)
 
     return breaking_articles
 
 
 def extract_keywords(text: str) -> list[str]:
-    """Extract meaningful keywords from text, filtering common words."""
     common_words = {
         "the",
         "a",
@@ -571,20 +926,16 @@ def extract_keywords(text: str) -> list[str]:
         "updates",
     }
 
-    # Clean and tokenize
     words = text.lower().replace("-", " ").replace("'", " ").split()
-    # Filter common words and short words
-    keywords = [word for word in words if len(word) > 2 and word not in common_words]
-    return keywords
+    return [word for word in words if len(word) > 2 and word not in common_words]
 
 
 async def fetch_trending_topics(countries: list[str]) -> dict[str, int]:
-    """Fetch trending topics across multiple countries."""
-    keyword_counts = {}
+    keyword_counts: dict[str, int] = {}
 
     for country in countries:
-        params = {
-            "apikey": NEWS_API_KEY,
+        params: Params = {
+            "apikey": NEWS_API_KEY or "",
             "country": country,
             "language": "en",
             "size": 10,
@@ -593,53 +944,41 @@ async def fetch_trending_topics(countries: list[str]) -> dict[str, int]:
         cache_key = _get_cache_key(params)
         cached = _get_from_cache(cache_key)
         if cached:
-            articles = cached.get("articles", [])
+            raw_articles = cached.get("articles", [])
+            articles = raw_articles if isinstance(raw_articles, list) else []
         else:
             try:
-                async with httpx.AsyncClient(timeout=20.0) as client:
-                    response = await client.get(NEWS_LATEST_URL, params=params)
-                    try:
-                        data = response.json()
-                    except Exception:
-                        continue
-
-                    if response.status_code == 200 and data.get("status") != "error":
-                        normalized = _normalize_response(data)
-                        _set_cache(cache_key, normalized)
-                        articles = normalized.get("articles", [])
-                    else:
-                        continue
+                data = await _fetch_news(params)
+                raw_articles = data.get("articles", [])
+                articles = raw_articles if isinstance(raw_articles, list) else []
             except Exception:
                 continue
 
-        # Extract keywords from titles
         for article in articles:
-            title = article.get("title", "") or ""
-            keywords = extract_keywords(title)
-            for keyword in keywords:
+            title = str(article.get("title", "") or "")
+            for keyword in extract_keywords(title):
                 keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
 
-    # Sort by count and return top 10
     sorted_topics = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)
     return dict(sorted_topics[:10])
 
 
 async def check_api_health() -> dict[str, str]:
-    """Check NewsData.io health by making a lightweight test request."""
-    params = {
-        "apikey": NEWS_API_KEY,
+    params: Params = {
+        "apikey": NEWS_API_KEY or "",
         "country": "us",
         "language": "en",
         "size": 1,
     }
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(NEWS_LATEST_URL, params=params, timeout=10.0)
+        timeout = httpx.Timeout(10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(NEWS_LATEST_URL, params=params)
 
             if response.status_code == 200:
                 data = response.json()
-                if data.get("status") == "error":
+                if isinstance(data, dict) and data.get("status") == "error":
                     results = data.get("results")
                     if isinstance(results, dict):
                         err = results.get("message", "Unknown error")
@@ -649,27 +988,23 @@ async def check_api_health() -> dict[str, str]:
                         "status": "unhealthy",
                         "error": f"API error: {err}",
                     }
+
                 return {
                     "status": "healthy",
                     "response_time": f"{response.elapsed.total_seconds():.2f}s",
                 }
-            elif response.status_code == 401:
-                return {
-                    "status": "unhealthy",
-                    "error": "Invalid API key",
-                }
-            elif response.status_code == 429:
-                return {
-                    "status": "unhealthy",
-                    "error": "Rate limit exceeded",
-                }
-            else:
-                return {
-                    "status": "unhealthy",
-                    "error": f"HTTP {response.status_code}",
-                }
-    except Exception as e:
+
+            if response.status_code == 401:
+                return {"status": "unhealthy", "error": "Invalid API key"}
+            if response.status_code == 429:
+                return {"status": "unhealthy", "error": "Rate limit exceeded"}
+
+            return {
+                "status": "unhealthy",
+                "error": f"HTTP {response.status_code}",
+            }
+    except Exception as exc:
         return {
             "status": "unhealthy",
-            "error": str(e),
+            "error": str(exc),
         }

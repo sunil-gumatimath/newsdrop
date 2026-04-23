@@ -2,20 +2,26 @@ import os
 
 from dotenv import load_dotenv
 
-# override=True makes values in .env take precedence over pre-existing OS
-# environment variables. Without this, a stale OS-level NEWS_API_KEY (e.g.
-# left over from a previous `setx` on Windows) will silently shadow the
-# value in .env and cause baffling 401 errors.
+# Ensure values from `.env` take precedence over any stale OS-level variables.
 load_dotenv(override=True)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# NewsData.io API key. Falls back to the provided key if not set in env.
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "pub_4b43fbbe97134722985c60446ed86b62")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+if not NEWS_API_KEY:
+    raise ValueError(
+        "NEWS_API_KEY not found in environment variables. "
+        "Please set it in your .env file or environment."
+    )
 
 DAILY_NEWS_TIME = os.getenv("DAILY_NEWS_TIME", "08:00")
 DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "us")
-ENABLE_RSS = os.getenv("ENABLE_RSS", "1")
+
+# Multi-source support. Set ENABLE_RSS=0 to disable RSS augmentation.
+ENABLE_RSS = os.getenv("ENABLE_RSS", "1") not in ("0", "false", "False", "no")
+
+# NewsData.io free tier request budget. Set to 0 to disable local request limiting.
+DAILY_REQUEST_LIMIT = int(os.getenv("DAILY_REQUEST_LIMIT", "200"))
 
 COUNTRIES = {
     "🇺🇸 United States": "us",
@@ -30,7 +36,6 @@ COUNTRIES = {
     "🇰🇷 South Korea": "kr",
 }
 
-# User-facing categories (kept same for UI compatibility)
 CATEGORIES = [
     "general",
     "technology",
