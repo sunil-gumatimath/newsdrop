@@ -3,16 +3,69 @@ import html
 import logging
 import re
 import httpx
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from config import (
     NEWS_API_KEY,
     NEWS_API_URL,
     NEWSDATA_CATEGORY_MAP,
     ENABLE_RSS,
+    DAILY_REQUEST_LIMIT,
 )
 from rss_feeds import fetch_rss_articles, has_rss_for
 
 logger = logging.getLogger(__name__)
+
+# Rate limiting: Track daily API requests
+_daily_request_count = 0
+_daily_request_date = date.today()
+_request_limit = DAILY_REQUEST_LIMIT if DAILY_REQUEST_LIMIT else 200
+
+
+def _check_rate_limit() -> bool:
+    """Check if we can make an API request without exceeding daily limit.
+    
+    Returns True if request is allowed, False if limit reached.
+    Automatically resets counter at midnight.
+    """
+    global _daily_request_count, _daily_request_date
+    
+    # Reset counter if it's a new day
+    today = date.today()
+    if today != _daily_request_date:
+        logger.info("New day detected, resetting request counter")
+        _daily_request_count = 0
+        _daily_request_date = today
+    
+    if _daily_request_count >= _request_limit:
+        logger.warning(
+            f"Daily request limit reached ({_daily_request_count}/{_request_limit})"
+        )
+        return False
+    
+    return True
+
+
+def _increment_request_count() -> None:
+    """Increment the daily request counter."""
+    global _daily_request_count
+    _daily_request_count += 1
+    logger.debug(f"API request count: {_daily_request_count}/{_request_limit}")
+
+
+def get_request_count() -> tuple[int, int]:
+    """Get current request count and limit for monitoring.
+    
+    Returns: (current_count, limit)
+    """
+    global _daily_request_count, _daily_request_date
+    
+    # Reset counter if it's a new day
+    today = date.today()
+    if today != _daily_request_date:
+        _daily_request_count = 0
+        _daily_request_date = today
+    
+    return _daily_request_count, _request_limit
 
 
 def _newsdata_date_to_iso(raw: str) -> str:
@@ -172,6 +225,15 @@ async def _fetch_newsdata(params: dict) -> dict:
     if cached:
         return cached
 
+    # Check rate limit before making API call
+    if not _check_rate_limit():
+        raise APIClientError(
+            f"Daily API request limit reached ({_daily_request_count}/{_request_limit}). "
+            "Please try again tomorrow or use RSS-only mode by setting ENABLE_RSS=0 in .env",
+            status_code=429,
+            api_code="RateLimitExceeded",
+        )
+
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(NEWS_API_URL, params=params)
         try:
@@ -194,6 +256,7 @@ async def _fetch_newsdata(params: dict) -> dict:
 
         normalized = _normalize_response(data)
         _set_cache(cache_key, normalized)
+        _increment_request_count()
         return normalized
 
 

@@ -60,6 +60,10 @@ NEWS_API_URL = "https://newsdata.io/api/1/latest"
 # disable and rely solely on NewsData.io.
 ENABLE_RSS = os.getenv("ENABLE_RSS", "1") not in ("0", "false", "False", "no")
 
+# Rate limiting: Maximum API requests per day for NewsData.io free tier
+# Free tier: 200 requests/day. Set to 0 to disable rate limiting.
+DAILY_REQUEST_LIMIT = int(os.getenv("DAILY_REQUEST_LIMIT", "200"))
+
 BREAKING_NEWS_KEYWORDS = [
     "breaking",
     "urgent",

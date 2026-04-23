@@ -31,6 +31,7 @@ from news_fetcher import (
     fetch_breaking_news,
     fetch_trending_topics,
     check_api_health,
+    get_request_count,
 )
 from database import (
     load_subscribers,
@@ -429,6 +430,7 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Check API health
         api_health = await check_api_health()
         db_health = check_db_health()
+        request_count, request_limit = get_request_count()
         
         await status_msg.delete()
         
@@ -452,7 +454,8 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             message += f"\n   Error: {db_health.get('error', 'Unknown')}"
         
-        message += f"\n\n📊 Cache: Active (5min TTL)\n"
+        message += f"\n\n📊 API Requests: {request_count}/{request_limit} today"
+        message += f"\n📊 Cache: Active (5min TTL)\n"
         message += f"🤖 Bot: Running"
         
         await update.message.reply_text(message, parse_mode="HTML")
