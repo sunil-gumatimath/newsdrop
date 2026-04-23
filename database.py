@@ -1,8 +1,9 @@
-"""SQLite-based storage for subscribers and user preferences.
+"""SQLite-based storage for subscribers, preferences, and followed topics.
 
 This module provides simple, thread-safe SQLite access for:
 - subscriber management
 - user preference storage
+- per-user followed topic storage
 
 It also performs lightweight schema migrations on startup so existing
 databases can be brought in line with the current application schema.
@@ -16,6 +17,8 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "bot_data.db"
 _lock = threading.Lock()
+
+MAX_FOLLOWED_TOPICS_PER_USER = 10
 
 
 def _get_connection() -> sqlite3.Connection:
@@ -57,6 +60,14 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             country TEXT NOT NULL DEFAULT 'us',
             category TEXT NOT NULL DEFAULT 'general',
             breaking_news_enabled INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS topic_follows (
+            chat_id INTEGER NOT NULL,
+            topic TEXT NOT NULL,
+            topic_normalized TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chat_id, topic_normalized)
         );
         """
     )
@@ -101,6 +112,48 @@ def _migrate_user_preferences(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_topic_follows(conn: sqlite3.Connection) -> None:
+    """Bring the topic_follows table up to the current schema."""
+    if not _table_exists(conn, "topic_follows"):
+        conn.execute(
+            """
+            CREATE TABLE topic_follows (
+                chat_id INTEGER NOT NULL,
+                topic TEXT NOT NULL,
+                topic_normalized TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, topic_normalized)
+            )
+            """
+        )
+        return
+
+    columns = _get_columns(conn, "topic_follows")
+
+    if "topic_normalized" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE topic_follows
+            ADD COLUMN topic_normalized TEXT NOT NULL DEFAULT ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE topic_follows
+            SET topic_normalized = LOWER(TRIM(topic))
+            WHERE topic_normalized = ''
+            """
+        )
+
+    if "created_at" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE topic_follows
+            ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            """
+        )
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Apply lightweight schema migrations."""
     if not _table_exists(conn, "subscribers"):
@@ -113,6 +166,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )
 
     _migrate_user_preferences(conn)
+    _migrate_topic_follows(conn)
 
 
 def _init_db() -> None:
@@ -123,17 +177,25 @@ def _init_db() -> None:
             _create_schema(conn)
             _migrate_schema(conn)
             conn.commit()
-            
-            # Migration: Add breaking_news_enabled column if it doesn't exist
+
+            # Legacy safety migration for older DBs missing this column
             cursor = conn.execute("PRAGMA table_info(user_preferences)")
-            columns = [row[1] for row in cursor.fetchall()]
+            columns = [row["name"] for row in cursor.fetchall()]
             if "breaking_news_enabled" not in columns:
                 conn.execute(
-                    "ALTER TABLE user_preferences ADD COLUMN breaking_news_enabled INTEGER NOT NULL DEFAULT 0"
+                    """
+                    ALTER TABLE user_preferences
+                    ADD COLUMN breaking_news_enabled INTEGER NOT NULL DEFAULT 0
+                    """
                 )
                 conn.commit()
         finally:
             conn.close()
+
+
+def _normalize_topic(topic: str) -> str:
+    """Normalize a followed topic for dedupe and comparison."""
+    return " ".join(topic.strip().lower().split())
 
 
 # Initialize on import
@@ -283,12 +345,16 @@ def get_breaking_news_preference(chat_id: int) -> bool:
         conn = _get_connection()
         try:
             cursor = conn.execute(
-                "SELECT breaking_news_enabled FROM user_preferences WHERE chat_id = ?",
+                """
+                SELECT breaking_news_enabled
+                FROM user_preferences
+                WHERE chat_id = ?
+                """,
                 (chat_id,),
             )
             row = cursor.fetchone()
             if row:
-                return bool(row[0])
+                return bool(row["breaking_news_enabled"])
             return False
         finally:
             conn.close()
@@ -313,26 +379,175 @@ def set_breaking_news_preference(chat_id: int, enabled: bool) -> None:
             conn.close()
 
 
+# ── Topic Follows ────────────────────────────────────────────────────
+
+
+def get_followed_topics(chat_id: int) -> list[str]:
+    """Return followed topics for a user in creation order."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT topic
+                FROM topic_follows
+                WHERE chat_id = ?
+                ORDER BY created_at ASC, topic ASC
+                """,
+                (chat_id,),
+            )
+            return [str(row["topic"]) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+
+def is_following_topic(chat_id: int, topic: str) -> bool:
+    """Return True if a user already follows the given topic."""
+    normalized = _normalize_topic(topic)
+    if not normalized:
+        return False
+
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT 1
+                FROM topic_follows
+                WHERE chat_id = ? AND topic_normalized = ?
+                """,
+                (chat_id, normalized),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+
+def add_followed_topic(chat_id: int, topic: str) -> tuple[bool, str]:
+    """Add a followed topic.
+
+    Returns:
+        (created, message)
+        - created=True if the topic was newly added
+        - created=False with a reason if it already exists or input is invalid
+    """
+    cleaned_topic = " ".join(topic.strip().split())
+    normalized = _normalize_topic(cleaned_topic)
+
+    if not normalized:
+        return False, "Topic cannot be empty."
+
+    with _lock:
+        conn = _get_connection()
+        try:
+            existing_count = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM topic_follows
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+
+            topic_count = int(existing_count["count"]) if existing_count else 0
+
+            existing = conn.execute(
+                """
+                SELECT 1
+                FROM topic_follows
+                WHERE chat_id = ? AND topic_normalized = ?
+                """,
+                (chat_id, normalized),
+            ).fetchone()
+
+            if existing is not None:
+                return False, "You already follow that topic."
+
+            if topic_count >= MAX_FOLLOWED_TOPICS_PER_USER:
+                return (
+                    False,
+                    f"You can follow up to {MAX_FOLLOWED_TOPICS_PER_USER} topics.",
+                )
+
+            conn.execute(
+                """
+                INSERT INTO topic_follows (chat_id, topic, topic_normalized)
+                VALUES (?, ?, ?)
+                """,
+                (chat_id, cleaned_topic, normalized),
+            )
+            conn.commit()
+            return True, cleaned_topic
+        finally:
+            conn.close()
+
+
+def remove_followed_topic(chat_id: int, topic: str) -> bool:
+    """Remove a followed topic. Returns True if removed, False if not found."""
+    normalized = _normalize_topic(topic)
+    if not normalized:
+        return False
+
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                DELETE FROM topic_follows
+                WHERE chat_id = ? AND topic_normalized = ?
+                """,
+                (chat_id, normalized),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def clear_followed_topics(chat_id: int) -> int:
+    """Remove all followed topics for a user. Returns number removed."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                "DELETE FROM topic_follows WHERE chat_id = ?",
+                (chat_id,),
+            )
+            conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
+        finally:
+            conn.close()
+
+
+# ── Health ───────────────────────────────────────────────────────────
+
+
 def check_db_health() -> dict[str, str]:
     """Check database health and return status information."""
     with _lock:
         conn = _get_connection()
         try:
-            cursor = conn.execute("SELECT 1")
-            cursor.fetchone()
-            
-            # Get subscriber count
-            cursor = conn.execute("SELECT COUNT(*) FROM subscribers")
-            sub_count = cursor.fetchone()[0]
-            
+            conn.execute("SELECT 1").fetchone()
+
+            subscriber_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM subscribers"
+            ).fetchone()
+            topic_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM topic_follows"
+            ).fetchone()
+
+            subscriber_count = int(subscriber_row["count"]) if subscriber_row else 0
+            topic_count = int(topic_row["count"]) if topic_row else 0
+
             return {
                 "status": "healthy",
-                "subscriber_count": str(sub_count),
+                "subscriber_count": str(subscriber_count),
+                "followed_topic_count": str(topic_count),
             }
-        except Exception as e:
+        except Exception as exc:
             return {
                 "status": "unhealthy",
-                "error": str(e),
+                "error": str(exc),
             }
         finally:
             conn.close()

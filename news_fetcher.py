@@ -930,8 +930,11 @@ def extract_keywords(text: str) -> list[str]:
     return [word for word in words if len(word) > 2 and word not in common_words]
 
 
-async def fetch_trending_topics(countries: list[str]) -> dict[str, int]:
+async def fetch_trending_topics(
+    countries: list[str], category: str = "general"
+) -> dict[str, int]:
     keyword_counts: dict[str, int] = {}
+    mapped_category = CATEGORY_MAP.get(category, category)
 
     for country in countries:
         params: Params = {
@@ -940,6 +943,9 @@ async def fetch_trending_topics(countries: list[str]) -> dict[str, int]:
             "language": "en",
             "size": 10,
         }
+
+        if mapped_category and mapped_category != "top":
+            params["category"] = mapped_category
 
         cache_key = _get_cache_key(params)
         cached = _get_from_cache(cache_key)
@@ -953,6 +959,10 @@ async def fetch_trending_topics(countries: list[str]) -> dict[str, int]:
                 articles = raw_articles if isinstance(raw_articles, list) else []
             except Exception:
                 continue
+
+        rss_articles = await _safe_fetch_rss(country, limit=20)
+        rss_articles = _filter_by_category(rss_articles, category)
+        articles = _merge_and_dedupe(articles, rss_articles, limit=20)
 
         for article in articles:
             title = str(article.get("title", "") or "")
