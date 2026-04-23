@@ -9,8 +9,13 @@ load_dotenv(override=True)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# NewsData.io API key. Falls back to the provided key if not set in env.
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "pub_4b43fbbe97134722985c60446ed86b62")
+# NewsData.io API key. Required - no fallback for security.
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+if not NEWS_API_KEY:
+    raise ValueError(
+        "NEWS_API_KEY not found in environment variables. "
+        "Please set it in your .env file or environment."
+    )
 
 DAILY_NEWS_TIME = os.getenv("DAILY_NEWS_TIME", "08:00")
 DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "in")

@@ -326,6 +326,78 @@ def _filter_by_query(articles: list[dict], query: str) -> list[dict]:
     return result
 
 
+# Category keywords for filtering RSS articles by topic
+_CATEGORY_KEYWORDS = {
+    "technology": [
+        "tech", "technology", "software", "hardware", "ai", "artificial intelligence",
+        "machine learning", "cyber", "digital", "app", "application", "startup",
+        "gadget", "device", "internet", "cloud", "data", "algorithm", "coding",
+        "programming", "developer", "innovation", "robot", "automation", "crypto",
+        "blockchain", "5g", "wireless", "computing", "chip", "semiconductor"
+    ],
+    "business": [
+        "business", "economy", "market", "stock", "finance", "economic", "company",
+        "corporate", "industry", "trade", "investment", "investor", "bank", "banking",
+        "fund", "revenue", "profit", "merger", "acquisition", "ipo", "startup",
+        "entrepreneur", "ceo", "executive", "commercial", "retail", "sales"
+    ],
+    "sports": [
+        "sport", "game", "match", "tournament", "championship", "league", "team",
+        "player", "coach", "athlete", "football", "soccer", "cricket", "basketball",
+        "tennis", "hockey", "baseball", "rugby", "olympic", "race", "win", "score",
+        "goal", "medal", "cup", "final", "semi-final", "victory", "defeat"
+    ],
+    "entertainment": [
+        "movie", "film", "actor", "actress", "celebrity", "music", "song", "album",
+        "concert", "artist", "band", "hollywood", "bollywood", "tv", "television",
+        "show", "series", "netflix", "streaming", "theater", "cinema", "award",
+        "oscar", "grammy", "festival", "entertainment", "celeb", "star"
+    ],
+    "health": [
+        "health", "medical", "doctor", "hospital", "disease", "virus", "covid",
+        "vaccine", "treatment", "medicine", "drug", "patient", "healthcare", "wellness",
+        "fitness", "exercise", "diet", "nutrition", "mental health", "pandemic",
+        "symptom", "cure", "research", "clinical", "pharmaceutical", "surgery"
+    ],
+    "science": [
+        "science", "scientific", "research", "study", "scientist", "discovery",
+        "space", "nasa", "astronomy", "physics", "chemistry", "biology", "nature",
+        "climate", "environment", "earth", "planet", "universe", "galaxy", "energy",
+        "experiment", "laboratory", "innovation", "breakthrough", "genetic", "dna"
+    ],
+}
+
+
+def _filter_by_category(articles: list[dict], category: str) -> list[dict]:
+    """Filter RSS articles by category using keyword matching.
+    
+    Requires at least 2 keyword matches for better precision, except for
+    sports which uses a single match due to specific terminology.
+    """
+    if category == "general" or category not in _CATEGORY_KEYWORDS:
+        return articles
+    
+    keywords = _CATEGORY_KEYWORDS[category]
+    result = []
+    
+    # Sports has very specific terminology, so 1 match is sufficient
+    # Other categories need 2+ matches to avoid false positives
+    min_matches = 1 if category == "sports" else 2
+    
+    for article in articles:
+        title = (article.get("title") or "").lower()
+        description = (article.get("description") or "").lower()
+        blob = title + " " + description
+        
+        # Count keyword matches
+        match_count = sum(1 for keyword in keywords if keyword in blob)
+        
+        if match_count >= min_matches:
+            result.append(article)
+    
+    return result
+
+
 # ── Public fetchers ──────────────────────────────────────────────────
 
 async def fetch_top_headlines(country: str = "in", category: str = "general") -> dict:
@@ -370,9 +442,9 @@ async def fetch_top_headlines(country: str = "in", category: str = "general") ->
 
     rss_articles = await rss_task
 
-    # Note: RSS feeds are general-purpose and don't expose category filtering.
-    # For non-'general' categories we rely on NewsData.io's category filter
-    # for topical precision and keep RSS as a breadth/freshness booster.
+    # Filter RSS articles by category using keyword matching
+    # This ensures RSS results are relevant to the selected topic
+    rss_articles = _filter_by_category(rss_articles, category)
 
     api_articles = (api_data or {}).get("articles", [])
 
