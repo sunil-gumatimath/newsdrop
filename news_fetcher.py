@@ -414,7 +414,7 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
         else:
             try:
                 async with httpx.AsyncClient(timeout=20.0) as client:
-                    response = await client.get(NEWS_API_URL, params=params)
+                    response = await client.get(NEWS_LATEST_URL, params=params)
                     try:
                         data = response.json()
                     except Exception:
@@ -445,20 +445,130 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
 def extract_keywords(text: str) -> list[str]:
     """Extract meaningful keywords from text, filtering common words."""
     common_words = {
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-        "of", "with", "by", "from", "as", "is", "was", "are", "were", "be",
-        "been", "being", "have", "has", "had", "do", "does", "did", "will",
-        "would", "could", "should", "may", "might", "must", "shall", "can",
-        "this", "that", "these", "those", "it", "its", "they", "them", "their",
-        "he", "him", "his", "she", "her", "hers", "we", "us", "our", "you",
-        "your", "i", "me", "my", "what", "which", "who", "whom", "when",
-        "where", "why", "how", "if", "then", "else", "while", "after", "before",
-        "between", "into", "through", "during", "until", "against", "without",
-        "within", "upon", "about", "above", "below", "over", "under", "again",
-        "further", "once", "here", "there", "all", "any", "both", "each",
-        "few", "more", "most", "other", "some", "such", "no", "nor", "not",
-        "only", "own", "same", "so", "than", "too", "very", "just", "now",
-        "says", "said", "new", "news", "report", "reports", "update", "updates"
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "as",
+        "is",
+        "was",
+        "are",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "can",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "they",
+        "them",
+        "their",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "hers",
+        "we",
+        "us",
+        "our",
+        "you",
+        "your",
+        "i",
+        "me",
+        "my",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "when",
+        "where",
+        "why",
+        "how",
+        "if",
+        "then",
+        "else",
+        "while",
+        "after",
+        "before",
+        "between",
+        "into",
+        "through",
+        "during",
+        "until",
+        "against",
+        "without",
+        "within",
+        "upon",
+        "about",
+        "above",
+        "below",
+        "over",
+        "under",
+        "again",
+        "further",
+        "once",
+        "here",
+        "there",
+        "all",
+        "any",
+        "both",
+        "each",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "now",
+        "says",
+        "said",
+        "new",
+        "news",
+        "report",
+        "reports",
+        "update",
+        "updates",
     }
 
     # Clean and tokenize
@@ -487,7 +597,7 @@ async def fetch_trending_topics(countries: list[str]) -> dict[str, int]:
         else:
             try:
                 async with httpx.AsyncClient(timeout=20.0) as client:
-                    response = await client.get(NEWS_API_URL, params=params)
+                    response = await client.get(NEWS_LATEST_URL, params=params)
                     try:
                         data = response.json()
                     except Exception:
@@ -525,7 +635,7 @@ async def check_api_health() -> dict[str, str]:
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(NEWS_API_URL, params=params, timeout=10.0)
+            response = await client.get(NEWS_LATEST_URL, params=params, timeout=10.0)
 
             if response.status_code == 200:
                 data = response.json()
