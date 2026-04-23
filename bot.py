@@ -5,7 +5,7 @@ import asyncio
 import html
 import logging
 from datetime import time
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
 from telegram import (
@@ -593,7 +593,9 @@ async def preferences(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
 
-    if not update.message:
+    message = update.effective_message
+    if not message:
+        logger.warning("Help command received without an effective message")
         return
 
     help_text = (
@@ -611,7 +613,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/health - Check bot health status\n"
         "/help - Show this help message"
     )
-    _ = await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+
+    try:
+        _ = await message.reply_text(help_text, parse_mode=ParseMode.HTML)
+    except Exception:
+        logger.exception("Failed to send /help response")
+        _ = await message.reply_text(
+            "Available Commands:\n\n"
+            "/start - Start the bot\n"
+            "/news - Get news briefing (uses your preferences)\n"
+            "/search <topic> - Search for specific news\n"
+            "/subscribe - Enable daily news delivery\n"
+            "/unsubscribe - Disable daily news delivery\n"
+            "/setcountry - Choose your news region\n"
+            "/setcategory - Choose your news topic\n"
+            "/prefs - View your current preferences\n"
+            "/breaking - Toggle breaking news alerts\n"
+            "/trending - View trending topics\n"
+            "/health - Check bot health status\n"
+            "/help - Show this help message"
+        )
 
 
 async def breaking_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -814,8 +835,28 @@ async def _setup_commands(
         BotCommand("trending", "View trending topics"),
         BotCommand("health", "Check bot health status"),
         BotCommand("help", "Show all commands"),
+        BotCommand("commands", "Show all commands"),
     ]
     await application.bot.set_my_commands(commands)
+
+
+async def error_handler(
+    update: Update | object, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    logger.exception("Unhandled bot error", exc_info=context.error)
+
+    if not isinstance(update, Update):
+        return
+
+    telegram_update = cast(Update, update)
+    message = telegram_update.effective_message
+    if message:
+        try:
+            _ = await message.reply_text(
+                "🔧 Something went wrong while processing that command. Please try again."
+            )
+        except Exception:
+            logger.exception("Failed to send error message to Telegram user")
 
 
 def main() -> None:
@@ -842,7 +883,9 @@ def main() -> None:
     app.add_handler(CommandHandler("trending", trending))
     app.add_handler(CommandHandler("health", health))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("commands", help_command))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(error_handler)
     app.post_init = _setup_commands
 
     if app.job_queue is None:
