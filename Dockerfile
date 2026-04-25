@@ -25,7 +25,8 @@ COPY rss_feeds.py .
 RUN mkdir -p /app/data
 
 # Set environment variables
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    DATABASE_PATH=/app/data/bot_data.db
 
 # Run the bot
 CMD ["python", "bot.py"]

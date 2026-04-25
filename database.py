@@ -1,9 +1,10 @@
-"""SQLite-based storage for subscribers, preferences, and followed topics.
+"""SQLite-based storage for subscribers, preferences, followed topics, and alerts.
 
 This module provides simple, thread-safe SQLite access for:
 - subscriber management
 - user preference storage
 - per-user followed topic storage
+- persistent breaking-alert delivery tracking
 
 It also performs lightweight schema migrations on startup so existing
 databases can be brought in line with the current application schema.
@@ -11,11 +12,25 @@ databases can be brought in line with the current application schema.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "bot_data.db"
+
+def _resolve_db_path() -> Path:
+    """Return the configured SQLite database path.
+
+    Set DATABASE_PATH to store the database somewhere outside the app directory,
+    for example /app/data/bot_data.db when running in Docker.
+    """
+    configured_path = os.getenv("DATABASE_PATH")
+    if configured_path:
+        return Path(configured_path).expanduser()
+    return Path(__file__).parent / "bot_data.db"
+
+
+DB_PATH = _resolve_db_path()
 _lock = threading.Lock()
 
 MAX_FOLLOWED_TOPICS_PER_USER = 10
@@ -23,6 +38,7 @@ MAX_FOLLOWED_TOPICS_PER_USER = 10
 
 def _get_connection() -> sqlite3.Connection:
     """Return a SQLite connection configured for concurrent access."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -69,6 +85,18 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (chat_id, topic_normalized)
         );
+
+        CREATE TABLE IF NOT EXISTS breaking_alerts (
+            chat_id INTEGER NOT NULL,
+            article_key TEXT NOT NULL,
+            article_url TEXT NOT NULL DEFAULT '',
+            article_title TEXT NOT NULL DEFAULT '',
+            sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chat_id, article_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_breaking_alerts_sent_at
+        ON breaking_alerts (sent_at);
         """
     )
 
@@ -154,6 +182,28 @@ def _migrate_topic_follows(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_breaking_alerts(conn: sqlite3.Connection) -> None:
+    """Create persistent tracking for delivered breaking alerts."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS breaking_alerts (
+            chat_id INTEGER NOT NULL,
+            article_key TEXT NOT NULL,
+            article_url TEXT NOT NULL DEFAULT '',
+            article_title TEXT NOT NULL DEFAULT '',
+            sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chat_id, article_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_breaking_alerts_sent_at
+        ON breaking_alerts (sent_at)
+        """
+    )
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Apply lightweight schema migrations."""
     if not _table_exists(conn, "subscribers"):
@@ -167,6 +217,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
     _migrate_user_preferences(conn)
     _migrate_topic_follows(conn)
+    _migrate_breaking_alerts(conn)
 
 
 def _init_db() -> None:
@@ -196,6 +247,11 @@ def _init_db() -> None:
 def _normalize_topic(topic: str) -> str:
     """Normalize a followed topic for dedupe and comparison."""
     return " ".join(topic.strip().lower().split())
+
+
+def _normalize_alert_key(article_key: str) -> str:
+    """Normalize an article identifier for breaking-alert dedupe."""
+    return " ".join(article_key.strip().lower().split())
 
 
 # Initialize on import
@@ -379,6 +435,105 @@ def set_breaking_news_preference(chat_id: int, enabled: bool) -> None:
             conn.close()
 
 
+def load_breaking_news_subscribers() -> set[int]:
+    """Return chat IDs for users who opted into breaking-news alerts."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT chat_id
+                FROM user_preferences
+                WHERE breaking_news_enabled = 1
+                """
+            )
+            return {row["chat_id"] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+
+def was_breaking_alert_sent(chat_id: int, article_key: str) -> bool:
+    """Return True if a breaking alert was already sent to this user."""
+    normalized_key = _normalize_alert_key(article_key)
+    if not normalized_key:
+        return False
+
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT 1
+                FROM breaking_alerts
+                WHERE chat_id = ? AND article_key = ?
+                """,
+                (chat_id, normalized_key),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+
+def mark_breaking_alert_sent(
+    chat_id: int,
+    article_key: str,
+    article_url: str = "",
+    article_title: str = "",
+) -> bool:
+    """Persist that a breaking alert was sent.
+
+    Returns True when this is the first recorded delivery for the user/article.
+    """
+    normalized_key = _normalize_alert_key(article_key)
+    if not normalized_key:
+        return False
+
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO breaking_alerts (
+                    chat_id,
+                    article_key,
+                    article_url,
+                    article_title
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    normalized_key,
+                    article_url.strip(),
+                    article_title.strip(),
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def cleanup_old_breaking_alerts(days: int = 14) -> int:
+    """Delete old breaking-alert tracking rows and return the number removed."""
+    retention_days = max(days, 1)
+
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                DELETE FROM breaking_alerts
+                WHERE sent_at < datetime('now', ?)
+                """,
+                (f"-{retention_days} days",),
+            )
+            conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
+        finally:
+            conn.close()
+
+
 # ── Topic Follows ────────────────────────────────────────────────────
 
 
@@ -535,14 +690,19 @@ def check_db_health() -> dict[str, str]:
             topic_row = conn.execute(
                 "SELECT COUNT(*) AS count FROM topic_follows"
             ).fetchone()
+            alert_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM breaking_alerts"
+            ).fetchone()
 
             subscriber_count = int(subscriber_row["count"]) if subscriber_row else 0
             topic_count = int(topic_row["count"]) if topic_row else 0
+            alert_count = int(alert_row["count"]) if alert_row else 0
 
             return {
                 "status": "healthy",
                 "subscriber_count": str(subscriber_count),
                 "followed_topic_count": str(topic_count),
+                "breaking_alert_count": str(alert_count),
             }
         except Exception as exc:
             return {

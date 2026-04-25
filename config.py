@@ -16,12 +16,28 @@ if not NEWS_API_KEY:
 
 DAILY_NEWS_TIME = os.getenv("DAILY_NEWS_TIME", "08:00")
 DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "us")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "")
 
 # Multi-source support. Set ENABLE_RSS=0 to disable RSS augmentation.
 ENABLE_RSS = os.getenv("ENABLE_RSS", "1") not in ("0", "false", "False", "no")
 
 # NewsData.io free tier request budget. Set to 0 to disable local request limiting.
 DAILY_REQUEST_LIMIT = int(os.getenv("DAILY_REQUEST_LIMIT", "200"))
+
+# Breaking-news alert settings.
+BREAKING_ALERT_INTERVAL_MINUTES = int(
+    os.getenv("BREAKING_ALERT_INTERVAL_MINUTES", "30")
+)
+BREAKING_ALERT_RETENTION_DAYS = int(os.getenv("BREAKING_ALERT_RETENTION_DAYS", "14"))
+BREAKING_ALERT_KEYWORDS = [
+    keyword.strip()
+    for keyword in os.getenv(
+        "BREAKING_ALERT_KEYWORDS",
+        "breaking,urgent,alert,earthquake,flood,storm,war,attack,explosion,"
+        "fire,crash,emergency,evacuation,shooting,terror,cyclone,hurricane",
+    ).split(",")
+    if keyword.strip()
+]
 
 COUNTRIES = {
     "🇺🇸 United States": "us",

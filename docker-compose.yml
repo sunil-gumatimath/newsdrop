@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   newsdrop:
@@ -11,3 +11,4 @@ services:
       - ./data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
+      - DATABASE_PATH=/app/data/bot_data.db

@@ -25,6 +25,9 @@ from telegram.ext import (
 )
 
 from config import (
+    BREAKING_ALERT_INTERVAL_MINUTES,
+    BREAKING_ALERT_KEYWORDS,
+    BREAKING_ALERT_RETENTION_DAYS,
     CATEGORIES,
     COUNTRIES,
     DAILY_NEWS_TIME,
@@ -35,22 +38,27 @@ from database import (
     add_followed_topic,
     add_subscriber,
     check_db_health,
+    cleanup_old_breaking_alerts,
     clear_followed_topics,
     get_breaking_news_preference,
     get_followed_topics,
     get_user_prefs,
     is_following_topic,
     is_subscriber,
+    load_breaking_news_subscribers,
     load_subscribers,
+    mark_breaking_alert_sent,
     remove_followed_topic,
     remove_subscriber,
     set_breaking_news_preference,
     set_user_prefs,
+    was_breaking_alert_sent,
 )
 from message_utils import send_chunked_message
 from news_fetcher import (
     APIClientError,
     check_api_health,
+    fetch_breaking_news,
     fetch_top_headlines,
     fetch_trending_topics,
     format_search_results,
@@ -190,6 +198,19 @@ def _parse_daily_time(value: str) -> time:
 def _get_articles(payload: dict[str, Any]) -> list[Article]:
     articles = payload.get("articles", [])
     return articles if isinstance(articles, list) else []
+
+
+def _get_article_key(article: Article) -> str:
+    url = _safe_url(article.get("url", ""))
+    if url:
+        return url
+
+    title = _normalize_topic(str(article.get("title", ""))).lower()
+    published_at = str(article.get("publishedAt", ""))
+    if not title:
+        return ""
+
+    return f"{title}|{published_at}"
 
 
 def _parse_callback_data(data: str) -> tuple[str, str] | None:
@@ -896,7 +917,8 @@ async def breaking_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     status_text = "enabled" if current_enabled else "disabled"
     _ = await message.reply_text(
         f"🚨 Breaking news alerts are currently <b>{status_text}</b>.\n\n"
-        "Breaking news will be pushed immediately when important stories are detected.",
+        f"The bot checks every {BREAKING_ALERT_INTERVAL_MINUTES} minute(s) and sends "
+        "important stories for your selected region.",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
     )
@@ -959,6 +981,7 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             health_message += (
                 f"\n   Followed topics: {db_health.get('followed_topic_count', '0')}"
             )
+            health_message += f"\n   Breaking alerts tracked: {db_health.get('breaking_alert_count', '0')}"
         else:
             health_message += f"\n   Error: {db_health.get('error', 'Unknown')}"
 
@@ -971,6 +994,83 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         logger.error("Error checking health: %s", exc)
         _ = await status_msg.edit_text("🔧 Failed to check health status.")
+
+
+async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
+    subscribers = load_breaking_news_subscribers()
+    if not subscribers:
+        logger.info("No users opted into breaking news alerts.")
+        return
+
+    if not BREAKING_ALERT_KEYWORDS:
+        logger.info(
+            "Breaking news alerts are disabled because no keywords are configured."
+        )
+        return
+
+    country_to_chats: dict[str, list[int]] = {}
+    for chat_id in subscribers:
+        prefs = get_user_prefs(chat_id, DEFAULT_COUNTRY)
+        country = prefs.get("country", DEFAULT_COUNTRY)
+        country_to_chats.setdefault(country, []).append(chat_id)
+
+    countries = list(country_to_chats.keys())
+    if not countries:
+        return
+
+    logger.info(
+        "Checking breaking news for %s opted-in user(s) across %s region(s).",
+        len(subscribers),
+        len(countries),
+    )
+
+    try:
+        cleanup_old_breaking_alerts(BREAKING_ALERT_RETENTION_DAYS)
+        articles = await fetch_breaking_news(countries, BREAKING_ALERT_KEYWORDS)
+    except APIClientError as exc:
+        logger.warning("News API error checking breaking alerts: %s", exc)
+        return
+    except Exception as exc:
+        logger.exception("Unexpected error checking breaking alerts: %s", exc)
+        return
+
+    if not articles:
+        logger.info("No breaking news matches found.")
+        return
+
+    sent_count = 0
+    for article in articles[:20]:
+        country = str(article.get("country", ""))
+        chat_ids = country_to_chats.get(country, [])
+        article_key = _get_article_key(article)
+
+        if not article_key:
+            continue
+
+        for chat_id in chat_ids:
+            title = str(article.get("title", ""))
+            url = _safe_url(article.get("url", ""))
+
+            if was_breaking_alert_sent(chat_id, article_key):
+                continue
+
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="🚨 <b>Breaking News Alert</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+                await _send_article_via_bot(context.bot, chat_id, article, 1)
+                if mark_breaking_alert_sent(chat_id, article_key, url, title):
+                    sent_count += 1
+            except Exception as exc:
+                logger.exception(
+                    "Failed to send breaking alert to %s: %s",
+                    chat_id,
+                    exc,
+                )
+
+    logger.info("Sent %s breaking news alert(s).", sent_count)
 
 
 async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1117,6 +1217,19 @@ def main() -> None:
         return
 
     app.job_queue.run_daily(send_daily_news, time=daily_time)
+
+    if BREAKING_ALERT_INTERVAL_MINUTES > 0:
+        app.job_queue.run_repeating(
+            send_breaking_news_alerts,
+            interval=BREAKING_ALERT_INTERVAL_MINUTES * 60,
+            first=60,
+        )
+        logger.info(
+            "Breaking news alerts scheduled every %s minute(s)",
+            BREAKING_ALERT_INTERVAL_MINUTES,
+        )
+    else:
+        logger.info("Breaking news alerts are disabled by configuration.")
 
     logger.info("Daily news scheduled for %s", DAILY_NEWS_TIME)
     logger.info("Bot starting...")
