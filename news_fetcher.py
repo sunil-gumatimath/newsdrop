@@ -273,35 +273,6 @@ def get_request_count() -> tuple[int, int]:
     return _daily_request_count, _request_limit
 
 
-def format_relative_time(published_at: str) -> str:
-    if not published_at:
-        return ""
-    try:
-        normalized = (
-            published_at.replace("Z", "+00:00")
-            if "T" in published_at or published_at.endswith("Z")
-            else published_at.replace(" ", "T") + "+00:00"
-        )
-        pub_time = datetime.fromisoformat(normalized)
-        if pub_time.tzinfo is None:
-            pub_time = pub_time.replace(tzinfo=timezone.utc)
-
-        now = datetime.now(pub_time.tzinfo)
-        delta = now - pub_time
-        total_seconds = int(delta.total_seconds())
-
-        if total_seconds < 60:
-            return "just now"
-        if total_seconds < 3600:
-            return f"{total_seconds // 60}m ago"
-        if total_seconds < 86400:
-            return f"{total_seconds // 3600}h ago"
-        if total_seconds < 172800:
-            return "yesterday"
-        return f"{total_seconds // 86400}d ago"
-    except Exception:
-        return ""
-
 
 def _escape_text(value: object) -> str:
     if value is None:
@@ -579,23 +550,26 @@ async def fetch_top_headlines(
     if mapped_category and mapped_category != "top":
         params["category"] = mapped_category
 
-    api_task = _fetch_news(params)
-    rss_task = _safe_fetch_rss(country, limit=20)
+    api_result, rss_result = await asyncio.gather(
+        _fetch_news(params),
+        _safe_fetch_rss(country, limit=20),
+        return_exceptions=True,
+    )
 
     api_data: NewsResponse | None = None
     api_error: Exception | None = None
+    rss_articles: list[Article] = []
 
-    try:
-        api_data, rss_articles = await asyncio.gather(api_task, rss_task)
-    except Exception:
-        try:
-            api_data = await api_task
-        except Exception as exc:
-            api_error = exc
-            logger.warning("NewsData.io fetch failed, will try RSS: %s", exc)
-        rss_articles = await rss_task
+    if isinstance(api_result, Exception):
+        api_error = api_result
+        logger.warning("NewsData.io fetch failed, will try RSS: %s", api_result)
+    elif isinstance(api_result, dict):
+        api_data = api_result
+
+    if isinstance(rss_result, Exception):
+        logger.warning("RSS fetch failed for %s: %s", country, rss_result)
     else:
-        api_error = None
+        rss_articles = rss_result
 
     rss_articles = _filter_by_category(rss_articles, category)
     api_articles = (api_data or {}).get("articles", [])
@@ -655,72 +629,6 @@ async def search_news(query: str, country: str = "us") -> NewsResponse:
     }
 
 
-def generate_summary(article: Article) -> str:
-    title = str(article.get("title", "No title"))
-    description = article.get("description", "")
-    content = article.get("content", "")
-
-    summary = description or content
-    if not summary:
-        return _escape_text(title)
-
-    sentences = str(summary).replace("..", ".").split(". ")
-    short = ". ".join(sentences[:3]).strip()
-    short = _truncate_text(short, 200)
-    return _escape_text(short)
-
-
-def format_briefing(
-    data: NewsResponse,
-    country: str = "us",
-    category: str = "general",
-) -> str:
-    raw_articles = data.get("articles", [])
-    articles: list[Article] = raw_articles if isinstance(raw_articles, list) else []
-
-    if not articles:
-        return (
-            f"No {_escape_text(category)} news articles found for "
-            f"{_escape_text(country.upper())}. Try again later."
-        )
-
-    first_article = articles[0] if articles else {}
-    published_at = str(first_article.get("publishedAt", ""))
-    date_str = (
-        published_at[:10] if published_at else datetime.now().strftime("%Y-%m-%d")
-    )
-
-    cat_label = category.capitalize() if category != "general" else "Top"
-    message = (
-        f"📰 <b>Daily News Briefing — {_escape_text(date_str)}</b>\n"
-        f"🌍 {_escape_text(cat_label)} Headlines ({_escape_text(country.upper())})\n\n"
-    )
-
-    for i, article in enumerate(articles[:10], 1):
-        source_obj = article.get("source", {})
-        source = (
-            _escape_text(source_obj.get("name", "Unknown"))
-            if isinstance(source_obj, dict)
-            else "Unknown"
-        )
-        title = str(article.get("title", "No title"))
-        url = str(article.get("url", ""))
-        description = article.get("description", "")
-        pub_time = str(article.get("publishedAt", ""))
-
-        time_label = (
-            f" · {_escape_text(format_relative_time(pub_time))}" if pub_time else ""
-        )
-        message += f"{_format_linked_title(i, title, url)}{time_label}\n"
-
-        if description:
-            desc = _truncate_text(str(description), 150)
-            message += f"<i>{_escape_text(desc)}</i>\n"
-
-        message += f"📍 {source}\n\n"
-
-    message += "Stay informed! 🌍"
-    return message
 
 
 def format_search_results(data: NewsResponse, query: str) -> str:
