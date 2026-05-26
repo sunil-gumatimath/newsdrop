@@ -862,6 +862,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/trending [category] - View trending topics, e.g. /trending tech\n"
         "/breaking - Toggle breaking news alerts\n"
         "/health - Check bot health status\n"
+        "/clear - Cleanup messages in the chat\n"
         "/prefs - View your current preferences\n"
         "/help - Show this help message\n"
         "/commands - Show all commands"
@@ -888,6 +889,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "/trending [category] - View category trends\n"
             "/breaking - Toggle breaking alerts\n"
             "/health - Check bot health\n"
+            "/clear - Cleanup messages in the chat\n"
             "/prefs - View preferences\n"
             "/help - Show this help message\n"
             "/commands - Show all commands"
@@ -994,6 +996,35 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         logger.error("Error checking health: %s", exc)
         _ = await status_msg.edit_text("🔧 Failed to check health status.")
+
+
+async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat_id = _effective_chat_id(update)
+    if not message or chat_id is None:
+        return
+
+    status_msg = await message.reply_text("🧹 Clearing messages...")
+    current_id = status_msg.message_id
+
+    # Try to delete the last 60 messages to clean up the chat
+    tasks = []
+    for msg_id in range(current_id, current_id - 60, -1):
+        tasks.append(context.bot.delete_message(chat_id=chat_id, message_id=msg_id))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    deleted_count = sum(1 for res in results if not isinstance(res, Exception))
+
+    # Send temporary confirmation
+    try:
+        confirm_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🧹 Cleared {deleted_count} message(s) from this chat."
+        )
+        await asyncio.sleep(3)
+        await confirm_msg.delete()
+    except Exception:
+        pass
 
 
 async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1153,6 +1184,7 @@ async def _setup_commands(
         BotCommand("breaking", "Toggle breaking news alerts"),
         BotCommand("trending", "View trending topics by category"),
         BotCommand("health", "Check bot health status"),
+        BotCommand("clear", "Cleanup messages in the chat"),
         BotCommand("help", "Show all commands"),
         BotCommand("commands", "Show all commands"),
     ]
@@ -1206,6 +1238,7 @@ def main() -> None:
     app.add_handler(CommandHandler("breaking", breaking_toggle))
     app.add_handler(CommandHandler("trending", trending))
     app.add_handler(CommandHandler("health", health))
+    app.add_handler(CommandHandler("clear", clear_chat))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", help_command))
     app.add_handler(CallbackQueryHandler(button_handler))
