@@ -32,6 +32,10 @@ RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
         ("NPR", "https://feeds.npr.org/1001/rss.xml"),
         ("BBC (US & Canada)", "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml"),
         ("NYT World", "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"),
+        ("Reuters", "https://openrss.org/feed/www.reuters.com"),
+        ("Associated Press", "https://openrss.org/feed/apnews.com"),
+        ("FactCheck.org", "https://www.factcheck.org/feed/"),
+        ("Bloomberg", "https://openrss.org/feed/www.bloomberg.com"),
     ],
     "gb": [
         ("BBC News", "https://feeds.bbci.co.uk/news/uk/rss.xml"),
