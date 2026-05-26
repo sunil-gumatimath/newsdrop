@@ -182,7 +182,7 @@ The bot merges news from two sources for maximum coverage and resilience:
 | Country | Sources |
 |---------|---------|
 | 🇮🇳 India | Times of India, The Hindu, NDTV, Indian Express, Hindustan Times |
-| 🇺🇸 United States | NPR, BBC, NYT World |
+| 🇺🇸 United States | NPR, BBC, NYT World, Reuters, Associated Press, FactCheck.org, Bloomberg |
 | 🇬🇧 United Kingdom | BBC News, The Guardian, Sky News |
 | 🇨🇦 Canada | CBC |
 | 🇦🇺 Australia | ABC News |
