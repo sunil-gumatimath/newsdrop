@@ -162,8 +162,8 @@ async def _fetch_feed(client: httpx.AsyncClient, source_name: str, url: str) -> 
         if response.status_code != 200:
             logger.warning("RSS feed %s returned HTTP %s", url, response.status_code)
             return []
-        # feedparser is synchronous but parses bytes quickly; run inline.
-        parsed = feedparser.parse(response.content)
+        # feedparser is synchronous but parses bytes quickly; offload to thread.
+        parsed = await asyncio.to_thread(feedparser.parse, response.content)
         if parsed.bozo and not parsed.entries:
             logger.warning(
                 "RSS feed %s failed to parse: %s", url, parsed.get("bozo_exception")
