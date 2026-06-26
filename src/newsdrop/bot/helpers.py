@@ -289,19 +289,16 @@ def _format_news_digest(
     category: str,
     country: str,
 ) -> str:
-    """Format articles into a single compact HTML digest message.
+    """Format articles into clean HTML card digest message.
 
-    Returns a well-formatted string (≤ 4096 chars) with all articles as
-    numbered clickable links, brief descriptions, source, and relative time.
+    Each article is rendered as a compact card: clickable bold title with
+    inline time/source meta on the same line, an indented description
+    below, and blank-line separators between cards.
     """
     cat_label = _category_label(category)
-    published_at = str(articles[0].get("publishedAt", "")) if articles else ""
-    rel = _format_relative_time(published_at)
-    date_str = rel if rel else "today"
 
     lines: list[str] = [
-        f"📰 <b>Daily News Briefing — {_escape_html(date_str)}</b>",
-        f"🌍 {_escape_html(cat_label)} Headlines ({_escape_html(country.upper())})",
+        f"📰 <b>Daily News Briefing</b>  ·  {_escape_html(cat_label)} ({_escape_html(country.upper())})",
         "",
     ]
 
@@ -312,26 +309,29 @@ def _format_news_digest(
         url = _safe_url(article.get("url", ""))
         description = _truncate_text(article.get("description", ""), 120)
 
-        # Title with inline link
+        # Meta parts inline with title
+        meta_parts: list[str] = []
+        if rel_time:
+            meta_parts.append(f"⏱{rel_time}")
+        meta_parts.append(f"📍{source_escaped}")
+        meta_str = " · ".join(meta_parts)
+
+        # Card header: number + clickable bold title + inline meta
         if url:
             escaped_url = html.escape(url, quote=True)
-            lines.append(f'<b>{i}.</b> <a href="{escaped_url}">{title}</a>')
+            lines.append(
+                f'<b>{i}.</b> <a href="{escaped_url}"><b>{title}</b></a>  ·  {meta_str}'
+            )
         else:
-            lines.append(f"<b>{i}.</b> {title}")
+            lines.append(f"<b>{i}.</b> <b>{title}</b>  ·  {meta_str}")
 
-        # Description snippet
+        # Description on its own line, clean indent
         if description:
-            lines.append(f"  <i>{_escape_html(description)}</i>")
+            lines.append(f"   {_escape_html(description)}")
 
-        # Meta line: time · source
-        meta: list[str] = []
-        if rel_time:
-            meta.append(f"⏱ {rel_time}")
-        meta.append(f"📍 {source_escaped}")
-        lines.append(f"  {' · '.join(meta)}")
         lines.append("")
 
-    lines.append("💡 /search &lt;topic&gt; to find specific news · /prefs to customize")
+    lines.append("💡 /search &lt;topic&gt; · /prefs to customize")
     return "\n".join(lines)
 
 
