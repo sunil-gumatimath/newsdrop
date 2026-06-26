@@ -12,6 +12,7 @@ databases can be brought in line with the current application schema.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import threading
@@ -223,7 +224,7 @@ _init_db()
 # ── Subscribers ──────────────────────────────────────────────────────
 
 
-def load_subscribers() -> set[int]:
+def _load_subscribers_sync() -> set[int]:
     with _lock:
         conn = _get_connection()
         try:
@@ -233,7 +234,11 @@ def load_subscribers() -> set[int]:
             conn.close()
 
 
-def add_subscriber(chat_id: int) -> bool:
+async def load_subscribers() -> set[int]:
+    return await asyncio.to_thread(_load_subscribers_sync)
+
+
+def _add_subscriber_sync(chat_id: int) -> bool:
     """Add a subscriber. Returns True if newly added, False if already exists."""
     with _lock:
         conn = _get_connection()
@@ -248,7 +253,11 @@ def add_subscriber(chat_id: int) -> bool:
             conn.close()
 
 
-def remove_subscriber(chat_id: int) -> bool:
+async def add_subscriber(chat_id: int) -> bool:
+    return await asyncio.to_thread(_add_subscriber_sync, chat_id)
+
+
+def _remove_subscriber_sync(chat_id: int) -> bool:
     """Remove a subscriber. Returns True if removed, False if not found."""
     with _lock:
         conn = _get_connection()
@@ -263,7 +272,11 @@ def remove_subscriber(chat_id: int) -> bool:
             conn.close()
 
 
-def is_subscriber(chat_id: int) -> bool:
+async def remove_subscriber(chat_id: int) -> bool:
+    return await asyncio.to_thread(_remove_subscriber_sync, chat_id)
+
+
+def _is_subscriber_sync(chat_id: int) -> bool:
     with _lock:
         conn = _get_connection()
         try:
@@ -276,10 +289,14 @@ def is_subscriber(chat_id: int) -> bool:
             conn.close()
 
 
+async def is_subscriber(chat_id: int) -> bool:
+    return await asyncio.to_thread(_is_subscriber_sync, chat_id)
+
+
 # ── User Preferences ─────────────────────────────────────────────────
 
 
-def get_user_prefs(chat_id: int, default_country: str = "us") -> dict[str, str]:
+def _get_user_prefs_sync(chat_id: int, default_country: str = "us") -> dict[str, str]:
     with _lock:
         conn = _get_connection()
         try:
@@ -302,7 +319,11 @@ def get_user_prefs(chat_id: int, default_country: str = "us") -> dict[str, str]:
             conn.close()
 
 
-def set_user_prefs(
+async def get_user_prefs(chat_id: int, default_country: str = "us") -> dict[str, str]:
+    return await asyncio.to_thread(_get_user_prefs_sync, chat_id, default_country)
+
+
+def _set_user_prefs_sync(
     chat_id: int,
     country: str | None = None,
     category: str | None = None,
@@ -357,7 +378,15 @@ def set_user_prefs(
             conn.close()
 
 
-def get_breaking_news_preference(chat_id: int) -> bool:
+async def set_user_prefs(
+    chat_id: int,
+    country: str | None = None,
+    category: str | None = None,
+) -> dict[str, str]:
+    return await asyncio.to_thread(_set_user_prefs_sync, chat_id, country, category)
+
+
+def _get_breaking_news_preference_sync(chat_id: int) -> bool:
     """Get breaking news preference for a user."""
     with _lock:
         conn = _get_connection()
@@ -378,7 +407,11 @@ def get_breaking_news_preference(chat_id: int) -> bool:
             conn.close()
 
 
-def set_breaking_news_preference(chat_id: int, enabled: bool) -> None:
+async def get_breaking_news_preference(chat_id: int) -> bool:
+    return await asyncio.to_thread(_get_breaking_news_preference_sync, chat_id)
+
+
+def _set_breaking_news_preference_sync(chat_id: int, enabled: bool) -> None:
     """Set breaking news preference for a user."""
     with _lock:
         conn = _get_connection()
@@ -397,7 +430,11 @@ def set_breaking_news_preference(chat_id: int, enabled: bool) -> None:
             conn.close()
 
 
-def load_breaking_news_subscribers() -> set[int]:
+async def set_breaking_news_preference(chat_id: int, enabled: bool) -> None:
+    return await asyncio.to_thread(_set_breaking_news_preference_sync, chat_id, enabled)
+
+
+def _load_breaking_news_subscribers_sync() -> set[int]:
     """Return chat IDs for users who opted into breaking-news alerts."""
     with _lock:
         conn = _get_connection()
@@ -414,7 +451,11 @@ def load_breaking_news_subscribers() -> set[int]:
             conn.close()
 
 
-def was_breaking_alert_sent(chat_id: int, article_key: str) -> bool:
+async def load_breaking_news_subscribers() -> set[int]:
+    return await asyncio.to_thread(_load_breaking_news_subscribers_sync)
+
+
+def _was_breaking_alert_sent_sync(chat_id: int, article_key: str) -> bool:
     """Return True if a breaking alert was already sent to this user."""
     normalized_key = _normalize_alert_key(article_key)
     if not normalized_key:
@@ -436,7 +477,11 @@ def was_breaking_alert_sent(chat_id: int, article_key: str) -> bool:
             conn.close()
 
 
-def mark_breaking_alert_sent(
+async def was_breaking_alert_sent(chat_id: int, article_key: str) -> bool:
+    return await asyncio.to_thread(_was_breaking_alert_sent_sync, chat_id, article_key)
+
+
+def _mark_breaking_alert_sent_sync(
     chat_id: int,
     article_key: str,
     article_url: str = "",
@@ -476,7 +521,22 @@ def mark_breaking_alert_sent(
             conn.close()
 
 
-def cleanup_old_breaking_alerts(days: int = 14) -> int:
+async def mark_breaking_alert_sent(
+    chat_id: int,
+    article_key: str,
+    article_url: str = "",
+    article_title: str = "",
+) -> bool:
+    return await asyncio.to_thread(
+        _mark_breaking_alert_sent_sync,
+        chat_id,
+        article_key,
+        article_url,
+        article_title,
+    )
+
+
+def _cleanup_old_breaking_alerts_sync(days: int = 14) -> int:
     """Delete old breaking-alert tracking rows and return the number removed."""
     retention_days = max(days, 1)
 
@@ -496,10 +556,14 @@ def cleanup_old_breaking_alerts(days: int = 14) -> int:
             conn.close()
 
 
+async def cleanup_old_breaking_alerts(days: int = 14) -> int:
+    return await asyncio.to_thread(_cleanup_old_breaking_alerts_sync, days)
+
+
 # ── Topic Follows ────────────────────────────────────────────────────
 
 
-def get_followed_topics(chat_id: int) -> list[str]:
+def _get_followed_topics_sync(chat_id: int) -> list[str]:
     """Return followed topics for a user in creation order."""
     with _lock:
         conn = _get_connection()
@@ -518,7 +582,11 @@ def get_followed_topics(chat_id: int) -> list[str]:
             conn.close()
 
 
-def is_following_topic(chat_id: int, topic: str) -> bool:
+async def get_followed_topics(chat_id: int) -> list[str]:
+    return await asyncio.to_thread(_get_followed_topics_sync, chat_id)
+
+
+def _is_following_topic_sync(chat_id: int, topic: str) -> bool:
     """Return True if a user already follows the given topic."""
     normalized = _normalize_topic(topic)
     if not normalized:
@@ -540,7 +608,11 @@ def is_following_topic(chat_id: int, topic: str) -> bool:
             conn.close()
 
 
-def add_followed_topic(chat_id: int, topic: str) -> tuple[bool, str]:
+async def is_following_topic(chat_id: int, topic: str) -> bool:
+    return await asyncio.to_thread(_is_following_topic_sync, chat_id, topic)
+
+
+def _add_followed_topic_sync(chat_id: int, topic: str) -> tuple[bool, str]:
     """Add a followed topic.
 
     Returns:
@@ -599,7 +671,11 @@ def add_followed_topic(chat_id: int, topic: str) -> tuple[bool, str]:
             conn.close()
 
 
-def remove_followed_topic(chat_id: int, topic: str) -> bool:
+async def add_followed_topic(chat_id: int, topic: str) -> tuple[bool, str]:
+    return await asyncio.to_thread(_add_followed_topic_sync, chat_id, topic)
+
+
+def _remove_followed_topic_sync(chat_id: int, topic: str) -> bool:
     """Remove a followed topic. Returns True if removed, False if not found."""
     normalized = _normalize_topic(topic)
     if not normalized:
@@ -621,7 +697,11 @@ def remove_followed_topic(chat_id: int, topic: str) -> bool:
             conn.close()
 
 
-def clear_followed_topics(chat_id: int) -> int:
+async def remove_followed_topic(chat_id: int, topic: str) -> bool:
+    return await asyncio.to_thread(_remove_followed_topic_sync, chat_id, topic)
+
+
+def _clear_followed_topics_sync(chat_id: int) -> int:
     """Remove all followed topics for a user. Returns number removed."""
     with _lock:
         conn = _get_connection()
@@ -636,10 +716,14 @@ def clear_followed_topics(chat_id: int) -> int:
             conn.close()
 
 
+async def clear_followed_topics(chat_id: int) -> int:
+    return await asyncio.to_thread(_clear_followed_topics_sync, chat_id)
+
+
 # ── Health ───────────────────────────────────────────────────────────
 
 
-def check_db_health() -> dict[str, str]:
+def _check_db_health_sync() -> dict[str, str]:
     """Check database health and return status information."""
     with _lock:
         conn = _get_connection()
@@ -673,3 +757,7 @@ def check_db_health() -> dict[str, str]:
             }
         finally:
             conn.close()
+
+
+async def check_db_health() -> dict[str, str]:
+    return await asyncio.to_thread(_check_db_health_sync)
