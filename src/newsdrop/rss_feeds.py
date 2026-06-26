@@ -9,7 +9,7 @@ import asyncio
 import html as html_lib
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
 import feedparser
@@ -91,7 +91,7 @@ def _parse_rss_date(entry: dict) -> str:
         t = entry.get(key)
         if t:
             try:
-                dt = datetime(*t[:6], tzinfo=timezone.utc)
+                dt = datetime(*t[:6], tzinfo=UTC)
                 return dt.isoformat()
             except Exception:
                 pass
@@ -102,7 +102,7 @@ def _parse_rss_date(entry: dict) -> str:
         try:
             dt = parsedate_to_datetime(raw)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return dt.isoformat()
         except Exception:
             pass

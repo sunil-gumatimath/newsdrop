@@ -24,7 +24,7 @@ that lands, the official deployment is `docker-compose up` (one bot replica).
 import asyncio
 import html
 import logging
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -38,15 +38,15 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
-from telegram.error import BadRequest, Forbidden, TelegramError
 
-from config import (
+from .config import (
     BREAKING_ALERT_INTERVAL_MINUTES,
     BREAKING_ALERT_KEYWORDS,
     BREAKING_ALERT_RETENTION_DAYS,
@@ -56,7 +56,7 @@ from config import (
     DEFAULT_COUNTRY,
     TELEGRAM_BOT_TOKEN,
 )
-from database import (
+from .database import (
     add_followed_topic,
     add_subscriber,
     check_db_health,
@@ -76,8 +76,8 @@ from database import (
     set_user_prefs,
     was_breaking_alert_sent,
 )
-from message_utils import send_chunked_message
-from news_fetcher import (
+from .message_utils import send_chunked_message
+from .news_fetcher import (
     APIClientError,
     check_api_health,
     fetch_breaking_news,
@@ -172,8 +172,8 @@ def _format_relative_time(iso_timestamp: str) -> str:
     try:
         dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
         delta = now - dt
         seconds = int(delta.total_seconds())
         if seconds < 0:
