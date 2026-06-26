@@ -43,7 +43,7 @@ Your personalized daily news briefing, delivered straight to Telegram.
 ```mermaid
 graph TD
     User([Telegram User]) <-->|Commands & Messages| Telegram[Telegram Bot API]
-    Telegram <-->|Async Handlers| Bot[bot.py]
+    Telegram <-->|Async Handlers| Bot[bot package]
 
     subgraph Core Application Layer
         Bot -->|Read/Write Prefs & Subs| DB[(database.py <br> SQLite / WAL)]
@@ -61,11 +61,16 @@ graph TD
         RSS -.->|HTTPS GET & feedparser| Feeds[(External RSS Feeds)]
     end
     
-    style User fill:#d4ebf2,stroke:#005c8a,stroke-width:2px
-    style Telegram fill:#2CA5E0,stroke:#0d82b3,stroke-width:2px,color:#fff
-    style DB fill:#f5d63d,stroke:#a68a00,stroke-width:2px
-    style WebAPI fill:#e38b8b,stroke:#a33232,stroke-width:2px
-    style Feeds fill:#f7aa74,stroke:#bf5e1b,stroke-width:2px
+    style User fill:#eceff1,stroke:#546e7a,stroke-width:2px,color:#263238
+    style Telegram fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#0d47a1
+    style Bot fill:#ede7f6,stroke:#5e35b1,stroke-width:2px,color:#311b92
+    style Fetcher fill:#ede7f6,stroke:#5e35b1,stroke-width:2px,color:#311b92
+    style Utils fill:#ede7f6,stroke:#5e35b1,stroke-width:2px,color:#311b92
+    style DB fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#f57f17
+    style NewsAPI fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b
+    style RSS fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b
+    style WebAPI fill:#ffe0b2,stroke:#f57c00,stroke-width:2px,color:#e65100
+    style Feeds fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#1b5e20
 ```
 
 ---
