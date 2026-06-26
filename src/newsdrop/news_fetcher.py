@@ -1,15 +1,15 @@
-# pyright: reportMissingImports=false
-from __future__ import annotations
-
 """
 newsdrop news fetcher.
 
 DEPLOYMENT WARNING — SINGLE-WORKER ONLY
 ========================================
 This module holds the following state in process-local memory (Python globals):
-    - _cache              : dict[str, tuple[datetime, NewsResponse]] — LRU-ish cache of API responses
-    - _daily_request_count: int                                       — count of NewsData.io requests used today
-    - _daily_request_date : datetime.date                            — the calendar date the counter is for
+    - _cache              : dict[str, tuple[datetime, NewsResponse]]
+                            — LRU-ish cache of API responses
+    - _daily_request_count: int
+                            — count of NewsData.io requests used today
+    - _daily_request_date : datetime.date
+                            — the calendar date the counter is for
     - ... (add any others you find)
 
 If you run multiple bot workers / replicas (e.g. `docker-compose up --scale bot=3`,
@@ -29,6 +29,9 @@ To run more than one worker, you must move this state to a shared backend
 (Redis is the obvious choice). See TODO-2026Q2 in the project notes — until
 that lands, the official deployment is `docker-compose up` (one bot replica).
 """
+
+# pyright: reportMissingImports=false
+from __future__ import annotations
 
 import asyncio
 import html

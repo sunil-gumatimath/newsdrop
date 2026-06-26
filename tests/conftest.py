@@ -1,19 +1,20 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import tempfile
 from pathlib import Path
 
-_PRE_IMPORT_DB = os.path.join(
-    tempfile.gettempdir(), "newsdrop_conftest_init.db"
-)
-os.environ.setdefault("DATABASE_PATH", _PRE_IMPORT_DB)
+_PRE_IMPORT_DB = Path(tempfile.gettempdir()) / "newsdrop_conftest_init.db"
+os.environ.setdefault("DATABASE_PATH", str(_PRE_IMPORT_DB))
 
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_SRC_PATH = os.path.join(_PROJECT_ROOT, "src")
-if _SRC_PATH not in sys.path:
-    sys.path.insert(0, _SRC_PATH)
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_SRC_PATH = _PROJECT_ROOT / "src"
+_SRC_PATH_STR = str(_SRC_PATH)
+if _SRC_PATH_STR not in sys.path:
+    sys.path.insert(0, _SRC_PATH_STR)
 
 import pytest
 
@@ -22,18 +23,14 @@ from newsdrop import news_fetcher as _news_fetcher_mod
 
 
 def _cleanup_pre_import_db() -> None:
-    if os.path.exists(_PRE_IMPORT_DB):
-        try:
-            os.unlink(_PRE_IMPORT_DB)
-        except OSError:
-            pass
+    if _PRE_IMPORT_DB.exists():
+        with contextlib.suppress(OSError):
+            _PRE_IMPORT_DB.unlink()
     for ext in ("-wal", "-shm"):
-        sidecar = _PRE_IMPORT_DB + ext
-        if os.path.exists(sidecar):
-            try:
-                os.unlink(sidecar)
-            except OSError:
-                pass
+        sidecar = Path(str(_PRE_IMPORT_DB) + ext)
+        if sidecar.exists():
+            with contextlib.suppress(OSError):
+                sidecar.unlink()
 
 
 _cleanup_pre_import_db()

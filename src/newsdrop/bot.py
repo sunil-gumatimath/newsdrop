@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-# pyright: reportMissingImports=false, reportMissingModuleSource=false
 """
 newsdrop Telegram bot.
 
@@ -21,7 +18,11 @@ To run more than one worker, you must move this state to a shared backend
 that lands, the official deployment is `docker-compose up` (one bot replica).
 """
 
+from __future__ import annotations
+
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
 import asyncio
+import contextlib
 import html
 import logging
 from datetime import UTC, datetime, time
@@ -440,10 +441,7 @@ async def _send_trending_results(
     status_msg = await message_target.reply_text("📊 Fetching trending topics...")
 
     try:
-        if country:
-            countries = [country]
-        else:
-            countries = list(COUNTRIES.values())
+        countries = [country] if country else list(COUNTRIES.values())
         trending_topics = await fetch_trending_topics(countries, category)
 
         await status_msg.delete()
@@ -496,7 +494,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ = await message.reply_text(welcome)
 
 
-async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """``/news`` — send a single compact digest with all top headlines.
 
     Instead of spamming 10+ individual messages (photo + caption + button),
@@ -1180,7 +1178,9 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             health_message += (
                 f"\n   Followed topics: {db_health.get('followed_topic_count', '0')}"
             )
-            health_message += f"\n   Breaking alerts tracked: {db_health.get('breaking_alert_count', '0')}"
+            health_message += (
+                f"\n   Breaking alerts tracked: {db_health.get('breaking_alert_count', '0')}"
+            )
         else:
             health_message += f"\n   Error: {db_health.get('error', 'Unknown')}"
 
@@ -1263,7 +1263,7 @@ async def _clear_chat_messages(
     return deleted, error_count
 
 
-async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def clear_chat(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """``/clear`` — ask for confirmation, then delete recent messages.
 
     The actual deletion is performed by the ``button_handler`` branch for
@@ -1421,13 +1421,11 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         except APIClientError as exc:
             logger.error("News API error sending daily news to %s: %s", chat_id, exc)
-            try:
+            with contextlib.suppress(Exception):
                 _ = await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"⚠️ Error fetching today's news: {exc}",
                 )
-            except Exception:
-                pass
         except Exception as exc:
             logger.exception("Failed to send news to %s: %s", chat_id, exc)
 
