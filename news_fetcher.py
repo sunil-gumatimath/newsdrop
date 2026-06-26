@@ -1,6 +1,35 @@
 # pyright: reportMissingImports=false
 from __future__ import annotations
 
+"""
+newsdrop news fetcher.
+
+DEPLOYMENT WARNING — SINGLE-WORKER ONLY
+========================================
+This module holds the following state in process-local memory (Python globals):
+    - _cache              : dict[str, tuple[datetime, NewsResponse]] — LRU-ish cache of API responses
+    - _daily_request_count: int                                       — count of NewsData.io requests used today
+    - _daily_request_date : datetime.date                            — the calendar date the counter is for
+    - ... (add any others you find)
+
+If you run multiple bot workers / replicas (e.g. `docker-compose up --scale bot=3`,
+or a Kubernetes Deployment with replicas > 1), EACH worker will have its OWN copy
+of these structures. Result: API responses will be re-fetched N times (one per
+worker), the daily NewsData.io request budget will be split across N counters
+(so DAILY_REQUEST_LIMIT effectively becomes N × configured limit per real user,
+but you'll burn through your real paid/free quota N× faster), and the cache
+will be effectively N× smaller.
+
+The cache is process-local. With N workers, the effective cache hit rate is
+divided by N. Daily request counters will also be per-worker, so
+DAILY_REQUEST_LIMIT effectively becomes N × configured limit. Workers in
+dev/staging should not be scaled until Redis lands.
+
+To run more than one worker, you must move this state to a shared backend
+(Redis is the obvious choice). See TODO-2026Q2 in the project notes — until
+that lands, the official deployment is `docker-compose up` (one bot replica).
+"""
+
 import asyncio
 import html
 import logging
@@ -11,7 +40,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from config import DAILY_REQUEST_LIMIT, ENABLE_RSS, NEWS_API_KEY
+from config import (
+    CATEGORY_KEYWORDS,
+    DAILY_REQUEST_LIMIT,
+    ENABLE_RSS,
+    NEWS_API_KEY,
+    WORD_RE,
+)
 from rss_feeds import fetch_rss_articles, has_rss_for
 
 Article = dict[str, Any]
@@ -20,7 +55,7 @@ Params = dict[str, str | int]
 
 NEWS_LATEST_URL = "https://newsdata.io/api/1/latest"
 
-# Simple in-memory cache: {cache_key: (timestamp, data)}
+# IN-MEMORY ONLY — see module docstring; move to Redis before scaling out.
 _cache: dict[str, tuple[datetime, NewsResponse]] = {}
 CACHE_TTL_SECONDS = 300  # 5 minutes
 HTTP_TIMEOUT_SECONDS = 15.0
@@ -35,194 +70,16 @@ CATEGORY_MAP = {
     "science": "science",
 }
 
-_WORD_RE = re.compile(r"[a-z0-9]+")
-
-_CATEGORY_KEYWORDS = {
-    "technology": [
-        "tech",
-        "technology",
-        "software",
-        "hardware",
-        "ai",
-        "artificial intelligence",
-        "machine learning",
-        "cyber",
-        "digital",
-        "app",
-        "application",
-        "startup",
-        "gadget",
-        "device",
-        "internet",
-        "cloud",
-        "data",
-        "algorithm",
-        "coding",
-        "programming",
-        "developer",
-        "innovation",
-        "robot",
-        "automation",
-        "crypto",
-        "blockchain",
-        "5g",
-        "wireless",
-        "computing",
-        "chip",
-        "semiconductor",
-    ],
-    "business": [
-        "business",
-        "economy",
-        "market",
-        "stock",
-        "finance",
-        "economic",
-        "company",
-        "corporate",
-        "industry",
-        "trade",
-        "investment",
-        "investor",
-        "bank",
-        "banking",
-        "fund",
-        "revenue",
-        "profit",
-        "merger",
-        "acquisition",
-        "ipo",
-        "startup",
-        "entrepreneur",
-        "ceo",
-        "executive",
-        "commercial",
-        "retail",
-        "sales",
-    ],
-    "sports": [
-        "sport",
-        "game",
-        "match",
-        "tournament",
-        "championship",
-        "league",
-        "team",
-        "player",
-        "coach",
-        "athlete",
-        "football",
-        "soccer",
-        "cricket",
-        "basketball",
-        "tennis",
-        "hockey",
-        "baseball",
-        "rugby",
-        "olympic",
-        "race",
-        "win",
-        "score",
-        "goal",
-        "medal",
-        "cup",
-        "final",
-        "semi-final",
-        "victory",
-        "defeat",
-    ],
-    "entertainment": [
-        "movie",
-        "film",
-        "actor",
-        "actress",
-        "celebrity",
-        "music",
-        "song",
-        "album",
-        "concert",
-        "artist",
-        "band",
-        "hollywood",
-        "bollywood",
-        "tv",
-        "television",
-        "show",
-        "series",
-        "netflix",
-        "streaming",
-        "theater",
-        "cinema",
-        "award",
-        "oscar",
-        "grammy",
-        "festival",
-        "entertainment",
-        "celeb",
-        "star",
-    ],
-    "health": [
-        "health",
-        "medical",
-        "doctor",
-        "hospital",
-        "disease",
-        "virus",
-        "covid",
-        "vaccine",
-        "treatment",
-        "medicine",
-        "drug",
-        "patient",
-        "healthcare",
-        "wellness",
-        "fitness",
-        "exercise",
-        "diet",
-        "nutrition",
-        "mental health",
-        "pandemic",
-        "symptom",
-        "cure",
-        "research",
-        "clinical",
-        "pharmaceutical",
-        "surgery",
-    ],
-    "science": [
-        "science",
-        "scientific",
-        "research",
-        "study",
-        "scientist",
-        "discovery",
-        "space",
-        "nasa",
-        "astronomy",
-        "physics",
-        "chemistry",
-        "biology",
-        "nature",
-        "climate",
-        "environment",
-        "earth",
-        "planet",
-        "universe",
-        "galaxy",
-        "energy",
-        "experiment",
-        "laboratory",
-        "innovation",
-        "breakthrough",
-        "genetic",
-        "dna",
-    ],
-}
+# _WORD_RE and _CATEGORY_KEYWORDS were moved to config.py as WORD_RE and
+# CATEGORY_KEYWORDS so all tunable taxonomy lists live in one place. They are
+# imported at the top of this module from `config`.
 
 logger = logging.getLogger(__name__)
 
 # Daily API request tracking for free-tier protection
+# IN-MEMORY ONLY — see module docstring; move to Redis before scaling out.
 _daily_request_count = 0
+# IN-MEMORY ONLY — see module docstring; move to Redis before scaling out.
 _daily_request_date = date.today()
 _request_limit = DAILY_REQUEST_LIMIT if DAILY_REQUEST_LIMIT > 0 else 200
 
@@ -463,7 +320,7 @@ async def _fetch_news(params: Params) -> NewsResponse:
 def _normalize_title(title: str) -> str:
     if not title:
         return ""
-    return " ".join(_WORD_RE.findall(title.lower()))
+    return " ".join(WORD_RE.findall(title.lower()))
 
 
 def _merge_and_dedupe(*sources: list[Article], limit: int = 10) -> list[Article]:
@@ -516,10 +373,10 @@ def _filter_by_query(articles: list[Article], query: str) -> list[Article]:
 
 
 def _filter_by_category(articles: list[Article], category: str) -> list[Article]:
-    if category == "general" or category not in _CATEGORY_KEYWORDS:
+    if category == "general" or category not in CATEGORY_KEYWORDS:
         return articles
 
-    keywords = _CATEGORY_KEYWORDS[category]
+    keywords = CATEGORY_KEYWORDS[category]
     min_matches = 1 if category == "sports" else 2
 
     filtered: list[Article] = []
@@ -649,10 +506,12 @@ def format_search_results(data: NewsResponse, query: str) -> str:
         )
         title = str(article.get("title", "No title"))
         url = str(article.get("url", ""))
-        summary = generate_summary(article)
+        summary = _truncate_text(
+            str(article.get("description", "") or article.get("content", "") or ""), 200
+        )
 
         message += f"{_format_linked_title(i, title, url)}\n"
-        message += f"<i>{summary}</i>\n"
+        message += f"<i>{_escape_text(summary)}</i>\n"
         message += f"📍 {source}\n\n"
 
     total_results = data.get("totalResults", 0)
@@ -670,9 +529,31 @@ def get_article_image(article: Article) -> str | None:
 async def fetch_breaking_news(
     countries: list[str], keywords: list[str]
 ) -> list[Article]:
+    # P1 #3 — guard against API budget exhaustion.
+    # BREAKING_ALERT_INTERVAL_MINUTES (default 30) means the cron fires 48x/day.
+    # Without this gate, N countries × 48 cycles can blow past DAILY_REQUEST_LIMIT.
+    # We stop iterating countries the moment the daily budget is gone, so later
+    # countries share the same budget exhaustion rather than each one issuing
+    # a doomed request. The cache is per-params-key, so a cache hit short-
+    # circuits _fetch_news entirely (no budget cost) — this gate only matters
+    # on cache misses, which is exactly the over-budget case we're fixing.
     breaking_articles: list[Article] = []
 
     for country in countries:
+        # Rate-limit gate: if the daily budget is gone, log once and bail out
+        # of the whole country loop (do not "continue" — remaining countries
+        # would just hit the same gate and spam the log).
+        if not _check_rate_limit():
+            current, limit = get_request_count()
+            logger.warning(
+                "Breaking-news fetch skipped for %s: daily budget exhausted "
+                "(%s/%s). Remaining countries will be skipped this cycle.",
+                country,
+                current,
+                limit,
+            )
+            break
+
         params: Params = {
             "apikey": NEWS_API_KEY or "",
             "country": country,
@@ -698,7 +579,28 @@ async def fetch_breaking_news(
             description = str(article.get("description", "")).lower()
             combined = f"{title} {description}"
 
-            if any(keyword.lower() in combined for keyword in keywords):
+            # P1 #4 — word-boundary keyword match.
+            # Previous substring check produced noisy false positives:
+            #   "war" matched "Star Wars", "attack" matched "attack ad",
+            #   "fire" matched "laid off", "crash" matched "app crash".
+            # Word boundaries fix all of those. Trade-off: "Star Wars" still
+            # matches "war" because "Wars" is a distinct token — acceptable,
+            # those headlines are rare in /news and one FP/day beats dozens
+            # of "attack ad" hits.
+            matched = [
+                kw
+                for kw in keywords
+                if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
+            ]
+            # Require the keyword to land in the title, OR have at least two
+            # distinct keywords hit anywhere in title+description (a strong
+            # signal that the article is genuinely about a tracked topic).
+            title_hits = [
+                kw
+                for kw in matched
+                if re.search(rf"\b{re.escape(kw.lower())}\b", title)
+            ]
+            if title_hits or len(matched) >= 2:
                 tagged = dict(article)
                 tagged["country"] = country
                 breaking_articles.append(tagged)

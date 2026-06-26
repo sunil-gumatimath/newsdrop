@@ -1,16 +1,37 @@
 from __future__ import annotations
 
 # pyright: reportMissingImports=false, reportMissingModuleSource=false
+"""
+newsdrop Telegram bot.
+
+DEPLOYMENT WARNING — SINGLE-WORKER ONLY
+========================================
+This module holds the following state in process-local memory (Python globals):
+    - _search_rate_limit : dict[int, float]   — per-user /search cooldown timestamps
+    - ... (add any others you find)
+
+If you run multiple bot workers / replicas (e.g. `docker-compose up --scale bot=3`,
+or a Kubernetes Deployment with replicas > 1), EACH worker will have its OWN copy
+of these structures. Result: rate limits, daily briefings, and per-user context
+will desync — a user might receive 3x the daily briefing, or be able to /search
+30 times/minute by landing on a different worker each call.
+
+To run more than one worker, you must move this state to a shared backend
+(Redis is the obvious choice). See TODO-2026Q2 in the project notes — until
+that lands, the official deployment is `docker-compose up` (one bot replica).
+"""
+
 import asyncio
 import html
 import logging
-from datetime import time
-from typing import Any, Protocol, cast
+from datetime import datetime, time, timezone
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from telegram import (
     Bot,
     BotCommand,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -23,6 +44,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
+from telegram.error import BadRequest, Forbidden, TelegramError
 
 from config import (
     BREAKING_ALERT_INTERVAL_MINUTES,
@@ -77,6 +99,7 @@ SearchRateLimit = dict[int, float]
 Article = dict[str, Any]
 Prefs = dict[str, str]
 
+# IN-MEMORY ONLY — see module docstring; move to Redis before scaling out.
 _search_rate_limit: SearchRateLimit = {}
 SEARCH_COOLDOWN_SECONDS = 10
 
@@ -98,11 +121,6 @@ TRENDING_CATEGORY_ALIASES = {
     "sci": "science",
     "science": "science",
 }
-
-
-class ReplyTarget(Protocol):
-    async def reply_text(self, text: str, **kwargs: Any) -> Message: ...
-    async def reply_photo(self, photo: str, **kwargs: Any) -> Message: ...
 
 
 def _escape_html(value: object) -> str:
@@ -141,6 +159,39 @@ def _safe_url(url: object) -> str:
 
 def _normalize_topic(topic: str) -> str:
     return " ".join(topic.strip().split())
+
+
+def _format_relative_time(iso_timestamp: str) -> str:
+    """Return a humanized 'time ago' string for a Telegram message.
+
+    Examples: "just now", "5m ago", "2h ago", "3d ago", "2024-11-30" (>= 7d).
+    Returns empty string if the timestamp is unparseable.
+    """
+    if not iso_timestamp:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta = now - dt
+        seconds = int(delta.total_seconds())
+        if seconds < 0:
+            return "just now"
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        if days < 7:
+            return f"{days}d ago"
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
 
 
 def _sanitize_follow_topic(topic: str) -> str:
@@ -233,10 +284,13 @@ def _build_article_caption(index: int, article: Article) -> str:
     title = _escape_html(article.get("title", "No title"))
     description = _truncate_text(article.get("description", ""), 150)
     source = _get_source_name(article)
+    rel_time = _format_relative_time(str(article.get("publishedAt", "")))
 
     caption = f"<b>{index}. {title}</b>\n"
     if description:
         caption += f"<i>{_escape_html(description)}</i>\n"
+    if rel_time:
+        caption += f"⏱ {rel_time}\n"
     caption += f"📍 {source}"
     return caption
 
@@ -288,43 +342,13 @@ def _format_followed_topics(topics: list[str]) -> str:
     return "\n".join(lines)
 
 
-async def _send_article_message(
-    message_target: ReplyTarget,
-    article: Article,
-    index: int,
-) -> None:
-    caption = _build_article_caption(index, article)
-    keyboard = _build_read_more_keyboard(article)
-    image_url = get_article_image(article)
-
-    try:
-        if image_url:
-            await message_target.reply_photo(
-                photo=image_url,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard,
-            )
-        else:
-            await message_target.reply_text(
-                caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard,
-            )
-    except Exception:
-        await message_target.reply_text(
-            caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-        )
-
-
-async def _send_article_via_bot(
+async def _send_article(
     bot: Bot,
     chat_id: int,
     article: Article,
     index: int,
 ) -> None:
+    """Send an article to a chat via the bot (supports photo + caption fallback)."""
     caption = _build_article_caption(index, article)
     keyboard = _build_read_more_keyboard(article)
     image_url = get_article_image(article)
@@ -358,11 +382,15 @@ async def _send_trending_results(
     message_target: Message,
     chat_id: int,
     category: str,
+    country: str | None = None,
 ) -> None:
     status_msg = await message_target.reply_text("📊 Fetching trending topics...")
 
     try:
-        countries = list(COUNTRIES.values())
+        if country:
+            countries = [country]
+        else:
+            countries = list(COUNTRIES.values())
         trending_topics = await fetch_trending_topics(countries, category)
 
         await status_msg.delete()
@@ -416,8 +444,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
-
     message = update.effective_message
     chat_id = _effective_chat_id(update)
     if not message or chat_id is None:
@@ -444,7 +470,8 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         cat_label = _category_label(category)
         published_at = str(articles[0].get("publishedAt", ""))
-        date_str = published_at[:10] if published_at else "today"
+        rel = _format_relative_time(published_at)
+        date_str = rel if rel else "today"
         header = (
             f"📰 <b>Daily News Briefing — {_escape_html(date_str)}</b>\n"
             f"🌍 {_escape_html(cat_label)} Headlines ({_escape_html(country.upper())})\n"
@@ -452,7 +479,7 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _ = await message.reply_text(header, parse_mode=ParseMode.HTML)
 
         for i, article in enumerate(articles[:10], 1):
-            await _send_article_message(message, article, i)
+            await _send_article(context.bot, chat_id, article, i)
 
         _ = await message.reply_text("Stay informed! 🌍")
 
@@ -581,20 +608,28 @@ async def list_followed_topics(
 async def unfollow_all_topics(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    """``/unfollowall`` — ask for confirmation, then remove ALL followed topics."""
     del context
 
     message = update.effective_message
+    user = update.effective_user
     chat_id = _effective_chat_id(update)
-    if not message or chat_id is None:
+    if not message or not user or chat_id is None:
         return
 
-    removed_count = clear_followed_topics(chat_id)
-    if removed_count > 0:
-        _ = await message.reply_text(
-            f"✅ Removed all followed topics ({removed_count})."
-        )
-    else:
-        _ = await message.reply_text("You were not following any topics.")
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "Yes, remove all topics",
+                callback_data=f"confirm:unfollowall:{user.id}",
+            ),
+            InlineKeyboardButton("Cancel", callback_data=f"cancel:unfollowall:{user.id}"),
+        ]
+    ]
+    _ = await message.reply_text(
+        "⚠️ This will remove ALL your followed topics. Are you sure?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def set_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -647,9 +682,184 @@ async def set_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
+async def _handle_country_callback(
+    query: CallbackQuery, chat_id: int, value: str
+) -> None:
+    valid_codes = set(COUNTRIES.values())
+    if value not in valid_codes:
+        logger.warning("Rejected invalid country code in callback: %s", value)
+        _ = await query.edit_message_text("⚠️ Invalid region selection.")
+        return
 
+    name = _country_name_from_code(value)
+    set_user_prefs(chat_id, country=value)
+    _ = await query.edit_message_text(
+        f"✅ Region set to <b>{_escape_html(name)}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _handle_category_callback(
+    query: CallbackQuery, chat_id: int, value: str
+) -> None:
+    if value not in CATEGORIES:
+        logger.warning("Rejected invalid category in callback: %s", value)
+        _ = await query.edit_message_text("⚠️ Invalid category selection.")
+        return
+
+    set_user_prefs(chat_id, category=value)
+    _ = await query.edit_message_text(
+        f"✅ Category set to <b>{_escape_html(value.capitalize())}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _handle_breaking_callback(
+    query: CallbackQuery, chat_id: int, value: str
+) -> None:
+    enabled = value == "1"
+    set_breaking_news_preference(chat_id, enabled)
+    status_text = "enabled" if enabled else "disabled"
+    _ = await query.edit_message_text(
+        f"✅ Breaking news alerts <b>{status_text}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _handle_search_callback(
+    query: CallbackQuery,
+    chat_id: int,
+    value: str,
+) -> None:
+    topic = _sanitize_follow_topic(value)
+    if not topic:
+        _ = await query.edit_message_text("⚠️ Invalid search topic.")
+        return
+
+    if not query.message:
+        _ = await query.edit_message_text("⚠️ Search message is unavailable.")
+        return
+
+    prefs = get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    country = prefs.get("country", DEFAULT_COUNTRY)
+    status_msg = await query.message.reply_text(f'🔍 Searching for "{topic}"...')
+
+    try:
+        data_search = await search_news(topic, country)
+        results = format_search_results(data_search, topic)
+        _ = await status_msg.delete()
+        await send_chunked_message(
+            query.message,
+            results,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        _search_rate_limit[chat_id] = _get_monotonic_time()
+    except APIClientError as exc:
+        logger.error("News API error searching news: %s", exc)
+        _ = await status_msg.edit_text(str(exc))
+    except Exception as exc:
+        logger.exception("Unexpected error searching news: %s", exc)
+        _ = await status_msg.edit_text(
+            "🔧 An unexpected error occurred. Please try again later."
+        )
+
+
+async def _handle_follow_callback(
+    query: CallbackQuery, chat_id: int, value: str
+) -> None:
+    topic = _sanitize_follow_topic(value)
+    created, result = add_followed_topic(chat_id, topic)
+    if query.message:
+        if created:
+            _ = await query.message.reply_text(
+                f"✅ Now following <b>{_escape_html(result)}</b>.",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            _ = await query.message.reply_text(f"⚠️ {result}")
+
+
+async def _handle_unfollow_callback(
+    query: CallbackQuery, chat_id: int, value: str
+) -> None:
+    topic = _sanitize_follow_topic(value)
+    removed = remove_followed_topic(chat_id, topic)
+    if query.message:
+        if removed:
+            _ = await query.message.reply_text(
+                f"✅ Unfollowed <b>{_escape_html(topic)}</b>.",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            _ = await query.message.reply_text(
+                "⚠️ You are not following that topic."
+            )
+
+
+async def _handle_confirm_or_cancel(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    action: str,
+    value: str,
+    data: str,
+) -> None:
+    """Handle confirm/cancel callback actions (clear chat, unfollow all)."""
+    kind_and_rest = value.split(":", 1)
+    if len(kind_and_rest) != 2:
+        logger.warning("Malformed confirm/cancel callback: %s", data)
+        _ = await query.edit_message_text("⚠️ Invalid selection.")
+        return
+
+    kind, rest = kind_and_rest
+
+    # rest is "user_id" or "user_id:orig_msg_id"
+    user_id_str = rest.split(":", 1)[0]
+    try:
+        expected_user_id = int(user_id_str)
+    except ValueError:
+        logger.warning("Malformed user_id in callback: %s", user_id_str)
+        _ = await query.edit_message_text("⚠️ Invalid selection.")
+        return
+
+    if query.from_user.id != expected_user_id:
+        await query.answer("This confirmation is not for you.", show_alert=True)
+        return
+
+    if action == "cancel":
+        _ = await query.edit_message_text("❌ Cancelled.")
+        return
+
+    # action == "confirm"
+    if kind == "clear":
+        parts = rest.split(":")
+        if len(parts) != 2:
+            logger.warning("Malformed clear callback: %s", data)
+            _ = await query.edit_message_text("⚠️ Invalid selection.")
+            return
+        orig_msg_id = int(parts[1])
+        deleted, _ = await _clear_chat_messages(
+            bot=context.bot, chat_id=chat_id, from_id=orig_msg_id, window=60
+        )
+        _ = await query.edit_message_text(f"🧹 Cleared {deleted} messages.")
+        return
+
+    if kind == "unfollowall":
+        removed_count = clear_followed_topics(chat_id)
+        if removed_count > 0:
+            _ = await query.edit_message_text(
+                f"✅ Removed all followed topics ({removed_count})."
+            )
+        else:
+            _ = await query.edit_message_text("You were not following any topics.")
+        return
+
+    logger.warning("Unknown confirm kind: %s", kind)
+    _ = await query.edit_message_text("⚠️ Unsupported action.")
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = _effective_chat_id(update)
     if not query:
@@ -671,108 +881,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     action, value = parsed
 
     if action == "country":
-        valid_codes = set(COUNTRIES.values())
-        if value not in valid_codes:
-            logger.warning("Rejected invalid country code in callback: %s", value)
-            _ = await query.edit_message_text("⚠️ Invalid region selection.")
-            return
-
-        name = _country_name_from_code(value)
-        set_user_prefs(chat_id, country=value)
-        _ = await query.edit_message_text(
-            f"✅ Region set to <b>{_escape_html(name)}</b>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    if action == "category":
-        if value not in CATEGORIES:
-            logger.warning("Rejected invalid category in callback: %s", value)
-            _ = await query.edit_message_text("⚠️ Invalid category selection.")
-            return
-
-        set_user_prefs(chat_id, category=value)
-        _ = await query.edit_message_text(
-            f"✅ Category set to <b>{_escape_html(value.capitalize())}</b>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    if action == "breaking":
-        enabled = value == "1"
-        set_breaking_news_preference(chat_id, enabled)
-        status_text = "enabled" if enabled else "disabled"
-        _ = await query.edit_message_text(
-            f"✅ Breaking news alerts <b>{status_text}</b>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    if action == "search":
-        topic = _sanitize_follow_topic(value)
-        if not topic:
-            _ = await query.edit_message_text("⚠️ Invalid search topic.")
-            return
-
-        if not query.message:
-            _ = await query.edit_message_text("⚠️ Search message is unavailable.")
-            return
-
-        prefs = get_user_prefs(chat_id, DEFAULT_COUNTRY)
-        country = prefs.get("country", DEFAULT_COUNTRY)
-        status_msg = await query.message.reply_text(f'🔍 Searching for "{topic}"...')
-
-        try:
-            data_search = await search_news(topic, country)
-            results = format_search_results(data_search, topic)
-            _ = await status_msg.delete()
-            await send_chunked_message(
-                query.message,
-                results,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-            _search_rate_limit[chat_id] = _get_monotonic_time()
-        except APIClientError as exc:
-            logger.error("News API error searching news: %s", exc)
-            _ = await status_msg.edit_text(str(exc))
-        except Exception as exc:
-            logger.exception("Unexpected error searching news: %s", exc)
-            _ = await status_msg.edit_text(
-                "🔧 An unexpected error occurred. Please try again later."
-            )
-        return
-
-    if action == "follow":
-        topic = _sanitize_follow_topic(value)
-        created, result = add_followed_topic(chat_id, topic)
-        if query.message:
-            if created:
-                _ = await query.message.reply_text(
-                    f"✅ Now following <b>{_escape_html(result)}</b>.",
-                    parse_mode=ParseMode.HTML,
-                )
-            else:
-                _ = await query.message.reply_text(f"⚠️ {result}")
-        return
-
-    if action == "unfollow":
-        topic = _sanitize_follow_topic(value)
-        removed = remove_followed_topic(chat_id, topic)
-        if query.message:
-            if removed:
-                _ = await query.message.reply_text(
-                    f"✅ Unfollowed <b>{_escape_html(topic)}</b>.",
-                    parse_mode=ParseMode.HTML,
-                )
-            else:
-                _ = await query.message.reply_text(
-                    "⚠️ You are not following that topic."
-                )
-        return
-
-    logger.warning("Unhandled callback action: %s", action)
-    _ = await query.edit_message_text("⚠️ Unsupported action.")
+        await _handle_country_callback(query, chat_id, value)
+    elif action == "category":
+        await _handle_category_callback(query, chat_id, value)
+    elif action == "breaking":
+        await _handle_breaking_callback(query, chat_id, value)
+    elif action == "search":
+        await _handle_search_callback(query, chat_id, value)
+    elif action == "follow":
+        await _handle_follow_callback(query, chat_id, value)
+    elif action == "unfollow":
+        await _handle_unfollow_callback(query, chat_id, value)
+    elif action in ("confirm", "cancel"):
+        await _handle_confirm_or_cancel(query, context, chat_id, action, value, data)
+    else:
+        logger.warning("Unhandled callback action: %s", action)
+        _ = await query.edit_message_text("⚠️ Unsupported action.")
 
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -825,14 +949,19 @@ async def preferences(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     category = prefs.get("category", "general")
     country_name = _country_name_from_code(country_code)
     followed_topics = get_followed_topics(chat_id)
+    breaking_enabled = get_breaking_news_preference(chat_id)
+    breaking_label = "ON" if breaking_enabled else "OFF"
+    breaking_emoji = "🔔" if breaking_enabled else "🔕"
 
     text = (
         "⚙️ <b>Your Preferences</b>\n\n"
         f"🌍 Region: {_escape_html(country_name)}\n"
         f"📂 Category: {_escape_html(category.capitalize())}\n"
-        f"🏷️ Followed topics: {len(followed_topics)}\n\n"
+        f"🏷️ Followed topics: {len(followed_topics)}\n"
+        f"{breaking_emoji} Breaking news: <b>{breaking_label}</b>\n\n"
         "Use /setcountry and /setcategory to change these.\n"
-        "Use /follows to see your followed topics."
+        "Use /follows to see your followed topics.\n"
+        "Use /breaking to toggle breaking news alerts."
     )
     _ = await message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -932,7 +1061,14 @@ async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not message or chat_id is None:
         return
 
-    raw_category = " ".join(context.args).strip() if context.args else ""
+    raw_category = context.args[0] if context.args else ""
+    raw_country = context.args[1] if len(context.args) >= 2 else None
+
+    # Resolve country: explicit override > saved DB preference > DEFAULT_COUNTRY
+    prefs = get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    saved_country = prefs.get("country", DEFAULT_COUNTRY)
+    country = raw_country or saved_country or DEFAULT_COUNTRY
+
     category = _resolve_trending_category(raw_category)
 
     if category is None:
@@ -942,7 +1078,7 @@ async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    await _send_trending_results(message, chat_id, category)
+    await _send_trending_results(message, chat_id, category, country)
 
 
 async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -998,33 +1134,104 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _ = await status_msg.edit_text("🔧 Failed to check health status.")
 
 
+async def _clear_chat_messages(
+    bot: Bot, chat_id: int, from_id: int, window: int = 60
+) -> tuple[int, int]:
+    """Walk ``range(from_id, from_id - window, -1)`` and try to delete each.
+
+    The bot must have admin (delete-message) rights in the chat for this to
+    work. Telegram only lets bots delete messages that are <48h old, so most
+    failures are expected and silently skipped. The first ``Forbidden`` aborts
+    the loop and posts a user-visible explanation; a flood of other errors is
+    capped at 5 so a single cleanup can never lock the bot in a hot loop.
+
+    Returns ``(deleted, errors)`` — the number of successful deletes and the
+    number of non-benign Telegram errors encountered. Benign ``BadRequest``
+    cases ("not found" / "can't be deleted" / "message is too old") are
+    swallowed without counting toward the error budget.
+    """
+    deleted = 0
+    error_count = 0
+
+    # python-telegram-bot 22.7 does not expose Bot.get_chat_history, so we
+    # approximate "recent messages" by trying to delete a contiguous ID range
+    # around the trigger message. Non-existent IDs and already-deleted
+    # messages are filtered out by the BadRequest handling below.
+    for msg_id in range(from_id, from_id - window, -1):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            deleted += 1
+        except Forbidden:
+            # Bot lacks admin rights, or the user is in a DM. Stop and tell
+            # them why we can't proceed — silent partial deletes are worse
+            # than a clear error.
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ I need admin rights in this chat to delete messages.",
+                )
+            except TelegramError as send_exc:
+                logger.warning("clear_chat could not post Forbidden notice: %s", send_exc)
+            return deleted, error_count
+        except BadRequest as exc:
+            s = str(exc).lower()
+            if (
+                "not found" in s
+                or "can't be deleted" in s
+                or "message is too old" in s
+            ):
+                # Benign: already gone, never ours, or past the 48h window.
+                continue
+            logger.warning("clear_chat BadRequest for message %s: %s", msg_id, exc)
+            error_count += 1
+            if error_count > 5:
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="⚠️ Stopped after 5 errors — chat may be too active.",
+                    )
+                except TelegramError as send_exc:
+                    logger.warning("clear_chat could not post stop notice: %s", send_exc)
+                return deleted, error_count
+        except TelegramError as exc:
+            logger.warning("clear_chat TelegramError for message %s: %s", msg_id, exc)
+            error_count += 1
+            if error_count > 5:
+                return deleted, error_count
+
+    return deleted, error_count
+
+
 async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/clear`` — ask for confirmation, then delete recent messages.
+
+    The actual deletion is performed by the ``button_handler`` branch for
+    ``confirm:clear:<user_id>:<orig_msg_id>``, which calls
+    :func:`_clear_chat_messages` starting from the original ``/clear``
+    message id. Encoding the id in the callback keeps the existing
+    60-message-back behavior intact: we delete the 60 messages ending at the
+    ``/clear`` command itself, not the confirmation prompt.
+    """
     message = update.effective_message
+    user = update.effective_user
     chat_id = _effective_chat_id(update)
-    if not message or chat_id is None:
+    if not message or not user or chat_id is None:
         return
 
-    status_msg = await message.reply_text("🧹 Clearing messages...")
-    current_id = status_msg.message_id
-
-    # Try to delete the last 60 messages to clean up the chat
-    tasks = []
-    for msg_id in range(current_id, current_id - 60, -1):
-        tasks.append(context.bot.delete_message(chat_id=chat_id, message_id=msg_id))
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    deleted_count = sum(1 for res in results if not isinstance(res, Exception))
-
-    # Send temporary confirmation
-    try:
-        confirm_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"🧹 Cleared {deleted_count} message(s) from this chat."
-        )
-        await asyncio.sleep(3)
-        await confirm_msg.delete()
-    except Exception:
-        pass
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "Yes, clear recent messages",
+                callback_data=f"confirm:clear:{user.id}:{message.message_id}",
+            ),
+            InlineKeyboardButton("Cancel", callback_data=f"cancel:clear:{user.id}"),
+        ]
+    ]
+    _ = await message.reply_text(
+        "⚠️ This will delete the last ~60 messages in this chat, including "
+        "this command. Are you sure?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1091,7 +1298,7 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
                     text="🚨 <b>Breaking News Alert</b>",
                     parse_mode=ParseMode.HTML,
                 )
-                await _send_article_via_bot(context.bot, chat_id, article, 1)
+                await _send_article(context.bot, chat_id, article, 1)
                 if mark_breaking_alert_sent(chat_id, article_key, url, title):
                     sent_count += 1
             except Exception as exc:
@@ -1133,7 +1340,8 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             cat_label = _category_label(category)
             published_at = str(articles[0].get("publishedAt", ""))
-            date_str = published_at[:10] if published_at else "today"
+            rel = _format_relative_time(published_at)
+            date_str = rel if rel else "today"
             header = (
                 f"📰 <b>Daily News Briefing — {_escape_html(date_str)}</b>\n"
                 f"🌍 {_escape_html(cat_label)} Headlines ({_escape_html(country.upper())})\n"
@@ -1145,7 +1353,7 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
 
             for i, article in enumerate(articles[:10], 1):
-                await _send_article_via_bot(context.bot, chat_id, article, i)
+                await _send_article(context.bot, chat_id, article, i)
 
             _ = await context.bot.send_message(
                 chat_id=chat_id, text="Stay informed! 🌍"
