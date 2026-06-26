@@ -28,7 +28,9 @@ def _resolve_db_path() -> Path:
     configured_path = os.getenv("DATABASE_PATH")
     if configured_path:
         return Path(configured_path).expanduser()
-    return Path(__file__).parent / "bot_data.db"
+    # Default to <project-root>/data/bot_data.db
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / "data" / "bot_data.db"
 
 
 DB_PATH = _resolve_db_path()

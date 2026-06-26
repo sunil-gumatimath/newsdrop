@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+from typing import Any, cast
+
+from telegram import BotCommand, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+)
+
+from ..config import (
+    BREAKING_ALERT_INTERVAL_MINUTES,
+    DAILY_NEWS_TIME,
+    TELEGRAM_BOT_TOKEN,
+)
+from .callbacks import button_handler
+from .commands import (
+    breaking_toggle,
+    clear_chat,
+    follow_topic,
+    health,
+    help_command,
+    list_followed_topics,
+    news,
+    preferences,
+    search,
+    set_category,
+    set_country,
+    start,
+    subscribe,
+    trending,
+    unfollow_all_topics,
+    unfollow_topic,
+    unsubscribe,
+)
+from .helpers import (
+    _parse_daily_time,
+    logger,
+)
+from .jobs import (
+    send_breaking_news_alerts,
+    send_daily_news,
+)
+
+
+async def _setup_commands(
+    application: Application[Any, Any, Any, Any, Any, Any],
+) -> None:
+    commands = [
+        BotCommand("start", "Start the bot"),
+        BotCommand("news", "Get latest news briefing"),
+        BotCommand("search", "Search news by topic"),
+        BotCommand("follow", "Follow a topic like AI or crypto"),
+        BotCommand("unfollow", "Unfollow a topic"),
+        BotCommand("follows", "View followed topics"),
+        BotCommand("topics", "Alias for followed topics"),
+        BotCommand("unfollowall", "Remove all followed topics"),
+        BotCommand("subscribe", "Enable daily news delivery"),
+        BotCommand("unsubscribe", "Disable daily news delivery"),
+        BotCommand("setcountry", "Choose your news region"),
+        BotCommand("setcategory", "Choose your news topic"),
+        BotCommand("prefs", "View your preferences"),
+        BotCommand("breaking", "Toggle breaking news alerts"),
+        BotCommand("trending", "View trending topics by category"),
+        BotCommand("health", "Check bot health status"),
+        BotCommand("clear", "Cleanup messages in the chat"),
+        BotCommand("help", "Show all commands"),
+        BotCommand("commands", "Show all commands"),
+    ]
+    await application.bot.set_my_commands(commands)
+
+
+async def error_handler(
+    update: Update | object, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    logger.exception("Unhandled bot error", exc_info=context.error)
+
+    if not isinstance(update, Update):
+        return
+
+    telegram_update = cast(Update, update)
+    message = telegram_update.effective_message
+    if message:
+        try:
+            _ = await message.reply_text(
+                "🔧 Something went wrong while processing that command. Please try again."
+            )
+        except Exception:
+            logger.exception("Failed to send error message to Telegram user")
+
+
+def main() -> None:
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
+        return
+
+    try:
+        daily_time = _parse_daily_time(DAILY_NEWS_TIME)
+    except ValueError as exc:
+        logger.error(str(exc))
+        return
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("news", news))
+    app.add_handler(CommandHandler("search", search))
+    app.add_handler(CommandHandler("follow", follow_topic))
+    app.add_handler(CommandHandler("unfollow", unfollow_topic))
+    app.add_handler(CommandHandler("follows", list_followed_topics))
+    app.add_handler(CommandHandler("topics", list_followed_topics))
+    app.add_handler(CommandHandler("unfollowall", unfollow_all_topics))
+    app.add_handler(CommandHandler("setcountry", set_country))
+    app.add_handler(CommandHandler("setcategory", set_category))
+    app.add_handler(CommandHandler("subscribe", subscribe))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    app.add_handler(CommandHandler("prefs", preferences))
+    app.add_handler(CommandHandler("breaking", breaking_toggle))
+    app.add_handler(CommandHandler("trending", trending))
+    app.add_handler(CommandHandler("health", health))
+    app.add_handler(CommandHandler("clear", clear_chat))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("commands", help_command))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(error_handler)
+    app.post_init = _setup_commands
+
+    if app.job_queue is None:
+        logger.error("Job queue is unavailable. Install job-queue dependencies.")
+        return
+
+    app.job_queue.run_daily(send_daily_news, time=daily_time)
+
+    if BREAKING_ALERT_INTERVAL_MINUTES > 0:
+        app.job_queue.run_repeating(
+            send_breaking_news_alerts,
+            interval=BREAKING_ALERT_INTERVAL_MINUTES * 60,
+            first=60,
+        )
+        logger.info(
+            "Breaking news alerts scheduled every %s minute(s)",
+            BREAKING_ALERT_INTERVAL_MINUTES,
+        )
+    else:
+        logger.info("Breaking news alerts are disabled by configuration.")
+
+    logger.info("Daily news scheduled for %s", DAILY_NEWS_TIME)
+    logger.info("Bot starting...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)

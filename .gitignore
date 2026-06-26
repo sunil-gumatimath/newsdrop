@@ -41,4 +41,7 @@ Thumbs.db
 *.tfstate.backup
 *.tfvars
 *.tfvars.json
-.terraform.lock.hcl
+.terraform.lock.hcl
+
+# Local newsdrop SQLite data folder
+/data/
