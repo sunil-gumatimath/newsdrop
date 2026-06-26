@@ -182,42 +182,16 @@ def _migrate_topic_follows(conn: sqlite3.Connection) -> None:
         )
 
 
-def _migrate_breaking_alerts(conn: sqlite3.Connection) -> None:
-    """Create persistent tracking for delivered breaking alerts."""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS breaking_alerts (
-            chat_id INTEGER NOT NULL,
-            article_key TEXT NOT NULL,
-            article_url TEXT NOT NULL DEFAULT '',
-            article_title TEXT NOT NULL DEFAULT '',
-            sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (chat_id, article_key)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_breaking_alerts_sent_at
-        ON breaking_alerts (sent_at)
-        """
-    )
-
-
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Apply lightweight schema migrations."""
-    if not _table_exists(conn, "subscribers"):
-        conn.execute(
-            """
-            CREATE TABLE subscribers (
-                chat_id INTEGER PRIMARY KEY
-            )
-            """
-        )
+    """Apply lightweight schema migrations.
 
+    Note: ``_create_schema()`` is always called first and handles all
+    ``CREATE TABLE IF NOT EXISTS`` statements. This function only adds
+    columns that may be missing from older databases and does not repeat
+    table creation or index creation already done by ``_create_schema``.
+    """
     _migrate_user_preferences(conn)
     _migrate_topic_follows(conn)
-    _migrate_breaking_alerts(conn)
 
 
 def _init_db() -> None:
@@ -228,18 +202,6 @@ def _init_db() -> None:
             _create_schema(conn)
             _migrate_schema(conn)
             conn.commit()
-
-            # Legacy safety migration for older DBs missing this column
-            cursor = conn.execute("PRAGMA table_info(user_preferences)")
-            columns = [row["name"] for row in cursor.fetchall()]
-            if "breaking_news_enabled" not in columns:
-                conn.execute(
-                    """
-                    ALTER TABLE user_preferences
-                    ADD COLUMN breaking_news_enabled INTEGER NOT NULL DEFAULT 0
-                    """
-                )
-                conn.commit()
         finally:
             conn.close()
 

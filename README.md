@@ -130,6 +130,7 @@ python bot.py
 | `/breaking` | Toggle scheduled breaking-news alerts |
 | `/trending [category]` | View trending topics, optionally filtered by category |
 | `/health` | Check bot, API, database, cache, and alert-tracking status |
+| `/clear` | Cleanup messages in the chat |
 | `/help` | Show all commands |
 | `/commands` | Alias for `/help` |
 
