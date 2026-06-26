@@ -33,5 +33,12 @@ Thumbs.db
 .cursor/
 .claude/
 
-# Logs
 *.log
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
+.terraform.lock.hcl
