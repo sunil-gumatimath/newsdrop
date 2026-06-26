@@ -193,6 +193,37 @@ The bot merges news from two sources for maximum coverage and resilience:
 | 🇧🇷 Brazil | G1 Globo |
 | 🇰🇷 South Korea | Chosun English |
 
+## Architecture
+
+```mermaid
+graph TD
+    User([Telegram User]) <-->|Commands & Messages| Telegram[Telegram Bot API]
+    Telegram <-->|Async Handlers| Bot[bot.py]
+
+    subgraph Core Application Layer
+        Bot -->|Read/Write Prefs & Subs| DB[(database.py <br> SQLite / WAL)]
+        Bot -->|Fetch Aggregated News| Fetcher[news_fetcher.py]
+        Bot -->|Format & Chunk Output| Utils[message_utils.py]
+    end
+
+    subgraph Data Source Aggregation
+        Fetcher -->|1. Async API Request| NewsAPI[NewsData.io API]
+        Fetcher -->|2. Parallel RSS Fetch| RSS[rss_feeds.py]
+    end
+
+    subgraph External Sources
+        NewsAPI -.->|HTTPS JSON| WebAPI[(NewsData Endpoints)]
+        RSS -.->|HTTPS GET & feedparser| Feeds[(External RSS Feeds)]
+    end
+    
+    style User fill:#d4ebf2,stroke:#005c8a,stroke-width:2px
+    style Telegram fill:#2CA5E0,stroke:#0d82b3,stroke-width:2px,color:#fff
+    style DB fill:#f5d63d,stroke:#a68a00,stroke-width:2px
+    style WebAPI fill:#e38b8b,stroke:#a33232,stroke-width:2px
+    style Feeds fill:#f7aa74,stroke:#bf5e1b,stroke-width:2px
+```
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
