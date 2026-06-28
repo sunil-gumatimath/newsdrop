@@ -200,6 +200,7 @@ Configure these settings inside your `.env` file (or pass them via environment v
 | `/follow <topic>` | Follow a custom topic like AI, climate, or crypto |
 | `/unfollow <topic>` | Stop following a custom topic |
 | `/follows` | View followed topics |
+| `/topics` | Alias for `/follows` |
 | `/unfollowall` | Remove all followed topics |
 | `/subscribe` | Enable daily news delivery at your configured time |
 | `/unsubscribe` | Disable daily news delivery |
@@ -211,6 +212,7 @@ Configure these settings inside your `.env` file (or pass them via environment v
 | `/health` | Check bot status, API budget, and SQLite database health |
 | `/clear` | Cleanup bot messages in the chat history |
 | `/help` | Show all commands |
+| `/commands` | Alias for `/help` |
 
 ---
 
