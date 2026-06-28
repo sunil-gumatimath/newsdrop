@@ -32,6 +32,7 @@ from ..news_fetcher import (
     search_news,
 )
 from .helpers import (
+    NEWS_COOLDOWN_SECONDS,
     SEARCH_COOLDOWN_SECONDS,
     TRENDING_CATEGORY_ALIASES,
     Prefs,
@@ -42,6 +43,7 @@ from .helpers import (
     _format_news_digest,
     _get_articles,
     _get_monotonic_time,
+    _news_rate_limit,
     _resolve_trending_category,
     _sanitize_follow_topic,
     _search_rate_limit,
@@ -79,6 +81,18 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     if not message or chat_id is None:
         return
 
+    # Per-user cooldown — same pattern as /search, but with a longer
+    # window since /news fetches a full digest (higher API cost).
+    current_time = _get_monotonic_time()
+    last_call = _news_rate_limit.get(chat_id, 0.0)
+    if current_time - last_call < NEWS_COOLDOWN_SECONDS:
+        remaining = int(NEWS_COOLDOWN_SECONDS - (current_time - last_call))
+        _ = await message.reply_text(
+            f"⏳ You're on a cooldown. Try again in {remaining} second(s). "
+            "Use /search for specific topics in the meantime."
+        )
+        return
+
     prefs: Prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     country = prefs.get("country", DEFAULT_COUNTRY)
     category = prefs.get("category", "general")
@@ -112,6 +126,9 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
+
+        # Record the successful call for cooldown tracking.
+        _news_rate_limit[chat_id] = _get_monotonic_time()
 
     except APIClientError as exc:
         logger.error("News API error fetching news: %s", exc)

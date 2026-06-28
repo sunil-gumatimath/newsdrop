@@ -43,6 +43,10 @@ Prefs = dict[str, str]
 _search_rate_limit: SearchRateLimit = {}
 SEARCH_COOLDOWN_SECONDS = 10
 
+# Per-user cooldown for /news to protect the NewsData.io free-tier budget.
+_news_rate_limit: dict[int, float] = {}
+NEWS_COOLDOWN_SECONDS = 30
+
 MAX_FOLLOW_TOPIC_LENGTH = 40
 
 TRENDING_CATEGORY_ALIASES = {
@@ -298,7 +302,8 @@ def _format_news_digest(
     cat_label = _category_label(category)
 
     lines: list[str] = [
-        f"📰 <b>Daily News Briefing</b>  ·  {_escape_html(cat_label)} ({_escape_html(country.upper())})",
+        f"📰 <b>Daily News Briefing</b>  ·  {_escape_html(cat_label)} "
+        f"({_escape_html(country.upper())})",
         "",
     ]
 
