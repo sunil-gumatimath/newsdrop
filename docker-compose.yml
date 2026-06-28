@@ -1,6 +1,13 @@
 version: "3.8"
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: newsdrop-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
   newsdrop:
     build: .
     container_name: newsdrop-bot
@@ -12,3 +19,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_PATH=/app/data/bot_data.db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+
+volumes:
+  redis_data:
