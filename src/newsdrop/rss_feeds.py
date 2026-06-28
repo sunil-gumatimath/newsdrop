@@ -165,9 +165,7 @@ async def _fetch_feed(client: httpx.AsyncClient, source_name: str, url: str) -> 
         # feedparser is synchronous but parses bytes quickly; offload to thread.
         parsed = await asyncio.to_thread(feedparser.parse, response.content)
         if parsed.bozo and not parsed.entries:
-            logger.warning(
-                "RSS feed %s failed to parse: %s", url, parsed.get("bozo_exception")
-            )
+            logger.warning("RSS feed %s failed to parse: %s", url, parsed.get("bozo_exception"))
             return []
         return [_entry_to_article(e, source_name) for e in parsed.entries]
     except Exception as e:
@@ -187,10 +185,7 @@ async def fetch_rss_articles(country: str, limit: int = 30) -> list[dict]:
 
     # Use a shared httpx client with a reasonable UA to avoid some 403s.
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (compatible; newsdrop-bot/1.0; "
-            "+https://github.com/newsdrop)"
-        )
+        "User-Agent": ("Mozilla/5.0 (compatible; newsdrop-bot/1.0; +https://github.com/newsdrop)")
     }
     async with httpx.AsyncClient(headers=headers) as client:
         tasks = [_fetch_feed(client, name, url) for name, url in feeds]

@@ -21,9 +21,7 @@ def test_init_db_creates_schema(tmp_db):
         "topic_follows",
         "breaking_alerts",
     }
-    assert expected.issubset(table_names), (
-        f"missing tables. expected {expected}, got {table_names}"
-    )
+    assert expected.issubset(table_names), f"missing tables. expected {expected}, got {table_names}"
 
 
 async def test_followed_topics_unique_per_user(tmp_db):

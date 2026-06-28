@@ -55,6 +55,4 @@ def test_start_command_responds():
     assert isinstance(sent_text, str) and sent_text.strip(), (
         f"expected non-empty greeting, got: {sent_text!r}"
     )
-    assert "Welcome" in sent_text, (
-        f"expected 'Welcome' in /start greeting, got: {sent_text!r}"
-    )
+    assert "Welcome" in sent_text, f"expected 'Welcome' in /start greeting, got: {sent_text!r}"

@@ -44,9 +44,7 @@ def test_chunk_message_splits_when_over_limit():
 
     assert len(chunks) >= 2, f"expected >=2 chunks, got {len(chunks)}"
     for chunk in chunks:
-        assert len(chunk) <= max_length + 2, (
-            f"chunk exceeds limit: {len(chunk)} > {max_length + 2}"
-        )
+        assert len(chunk) <= max_length + 2, f"chunk exceeds limit: {len(chunk)} > {max_length + 2}"
     reassembled = "".join(chunks)
     assert section_a in reassembled
     assert section_b in reassembled

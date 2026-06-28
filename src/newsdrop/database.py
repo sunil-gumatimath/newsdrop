@@ -122,9 +122,7 @@ def _migrate_user_preferences(conn: sqlite3.Connection) -> None:
     columns = _get_columns(conn, "user_preferences")
 
     if "country" not in columns:
-        conn.execute(
-            "ALTER TABLE user_preferences ADD COLUMN country TEXT NOT NULL DEFAULT 'us'"
-        )
+        conn.execute("ALTER TABLE user_preferences ADD COLUMN country TEXT NOT NULL DEFAULT 'us'")
 
     if "category" not in columns:
         conn.execute(
@@ -732,15 +730,9 @@ def _check_db_health_sync() -> dict[str, str]:
         try:
             conn.execute("SELECT 1").fetchone()
 
-            subscriber_row = conn.execute(
-                "SELECT COUNT(*) AS count FROM subscribers"
-            ).fetchone()
-            topic_row = conn.execute(
-                "SELECT COUNT(*) AS count FROM topic_follows"
-            ).fetchone()
-            alert_row = conn.execute(
-                "SELECT COUNT(*) AS count FROM breaking_alerts"
-            ).fetchone()
+            subscriber_row = conn.execute("SELECT COUNT(*) AS count FROM subscribers").fetchone()
+            topic_row = conn.execute("SELECT COUNT(*) AS count FROM topic_follows").fetchone()
+            alert_row = conn.execute("SELECT COUNT(*) AS count FROM breaking_alerts").fetchone()
 
             subscriber_count = int(subscriber_row["count"]) if subscriber_row else 0
             topic_count = int(topic_row["count"]) if topic_row else 0

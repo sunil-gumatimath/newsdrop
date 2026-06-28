@@ -26,9 +26,7 @@ ENABLE_RSS = os.getenv("ENABLE_RSS", "1") not in ("0", "false", "False", "no")
 DAILY_REQUEST_LIMIT = int(os.getenv("DAILY_REQUEST_LIMIT", "200"))
 
 # Breaking-news alert settings.
-BREAKING_ALERT_INTERVAL_MINUTES = int(
-    os.getenv("BREAKING_ALERT_INTERVAL_MINUTES", "30")
-)
+BREAKING_ALERT_INTERVAL_MINUTES = int(os.getenv("BREAKING_ALERT_INTERVAL_MINUTES", "30"))
 BREAKING_ALERT_RETENTION_DAYS = int(os.getenv("BREAKING_ALERT_RETENTION_DAYS", "14"))
 BREAKING_ALERT_KEYWORDS = [
     keyword.strip()
