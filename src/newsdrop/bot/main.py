@@ -15,6 +15,8 @@ from ..config import (
     DAILY_NEWS_TIME,
     TELEGRAM_BOT_TOKEN,
 )
+from ..logging_config import setup_logging
+from ..metrics import UNEXPECTED_ERRORS, increment
 from .callbacks import button_handler
 from .commands import (
     breaking_toggle,
@@ -72,9 +74,8 @@ async def _setup_commands(
     await application.bot.set_my_commands(commands)
 
 
-async def error_handler(
-    update: Update | object, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def error_handler(update: Update | object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await increment(UNEXPECTED_ERRORS)
     logger.exception("Unhandled bot error", exc_info=context.error)
 
     if not isinstance(update, Update):
@@ -92,6 +93,8 @@ async def error_handler(
 
 
 def main() -> None:
+    setup_logging()
+
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
         return
