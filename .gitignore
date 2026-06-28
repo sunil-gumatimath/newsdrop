@@ -32,6 +32,22 @@ Thumbs.db
 .qwen/
 .cursor/
 .claude/
+.kimchi/
+
+# Cache dirs
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Package manager lock (using setuptools, not uv)
+uv.lock
+
+# Deploy scripts (replaced by CI/CD)
+deploy_existing.ps1
+deploy_existing.sh
+
+# Documentation no longer needed
+DEPLOY_GCP.md
 
 *.log
 
