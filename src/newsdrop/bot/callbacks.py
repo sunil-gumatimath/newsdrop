@@ -23,22 +23,24 @@ from ..news_fetcher import (
     format_search_results,
     search_news,
 )
+from ..state import (
+    rate_limit_check,
+    rate_limit_record,
+)
 from .helpers import (
+    SEARCH_COOLDOWN_SECONDS,
+    SEARCH_RATE_LIMIT_SCOPE,
     _clear_chat_messages,
     _country_name_from_code,
     _effective_chat_id,
     _escape_html,
-    _get_monotonic_time,
     _parse_callback_data,
     _sanitize_follow_topic,
-    _search_rate_limit,
     logger,
 )
 
 
-async def _handle_country_callback(
-    query: CallbackQuery, chat_id: int, value: str
-) -> None:
+async def _handle_country_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
     valid_codes = set(COUNTRIES.values())
     if value not in valid_codes:
         logger.warning("Rejected invalid country code in callback: %s", value)
@@ -53,9 +55,7 @@ async def _handle_country_callback(
     )
 
 
-async def _handle_category_callback(
-    query: CallbackQuery, chat_id: int, value: str
-) -> None:
+async def _handle_category_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
     if value not in CATEGORIES:
         logger.warning("Rejected invalid category in callback: %s", value)
         _ = await query.edit_message_text("⚠️ Invalid category selection.")
@@ -68,9 +68,7 @@ async def _handle_category_callback(
     )
 
 
-async def _handle_breaking_callback(
-    query: CallbackQuery, chat_id: int, value: str
-) -> None:
+async def _handle_breaking_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
     enabled = value == "1"
     await set_breaking_news_preference(chat_id, enabled)
     status_text = "enabled" if enabled else "disabled"
@@ -94,6 +92,13 @@ async def _handle_search_callback(
         _ = await query.edit_message_text("⚠️ Search message is unavailable.")
         return
 
+    if await rate_limit_check(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
+        _ = await query.answer(
+            f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS}s before searching again.",
+            show_alert=True,
+        )
+        return
+
     prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     country = prefs.get("country", DEFAULT_COUNTRY)
     status_msg = await query.message.reply_text(f'🔍 Searching for "{topic}"...')
@@ -108,20 +113,16 @@ async def _handle_search_callback(
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-        _search_rate_limit[chat_id] = _get_monotonic_time()
+        await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
     except APIClientError as exc:
         logger.error("News API error searching news: %s", exc)
         _ = await status_msg.edit_text(str(exc))
     except Exception as exc:
         logger.exception("Unexpected error searching news: %s", exc)
-        _ = await status_msg.edit_text(
-            "🔧 An unexpected error occurred. Please try again later."
-        )
+        _ = await status_msg.edit_text("🔧 An unexpected error occurred. Please try again later.")
 
 
-async def _handle_follow_callback(
-    query: CallbackQuery, chat_id: int, value: str
-) -> None:
+async def _handle_follow_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
     topic = _sanitize_follow_topic(value)
     created, result = await add_followed_topic(chat_id, topic)
     if query.message:
@@ -134,9 +135,7 @@ async def _handle_follow_callback(
             _ = await query.message.reply_text(f"⚠️ {result}")
 
 
-async def _handle_unfollow_callback(
-    query: CallbackQuery, chat_id: int, value: str
-) -> None:
+async def _handle_unfollow_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
     topic = _sanitize_follow_topic(value)
     removed = await remove_followed_topic(chat_id, topic)
     if query.message:
@@ -146,9 +145,7 @@ async def _handle_unfollow_callback(
                 parse_mode=ParseMode.HTML,
             )
         else:
-            _ = await query.message.reply_text(
-                "⚠️ You are not following that topic."
-            )
+            _ = await query.message.reply_text("⚠️ You are not following that topic.")
 
 
 async def _handle_confirm_or_cancel(
@@ -200,9 +197,7 @@ async def _handle_confirm_or_cancel(
     if kind == "unfollowall":
         removed_count = await clear_followed_topics(chat_id)
         if removed_count > 0:
-            _ = await query.edit_message_text(
-                f"✅ Removed all followed topics ({removed_count})."
-            )
+            _ = await query.edit_message_text(f"✅ Removed all followed topics ({removed_count}).")
         else:
             _ = await query.edit_message_text("You were not following any topics.")
         return

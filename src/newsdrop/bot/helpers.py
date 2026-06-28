@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import html
 import logging
 import re
@@ -35,17 +34,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-SearchRateLimit = dict[int, float]
 Article = dict[str, Any]
 NewsResponse = dict[str, Any]
 Prefs = dict[str, str]
 
-# IN-MEMORY ONLY — see module docstring; move to Redis before scaling out.
-_search_rate_limit: SearchRateLimit = {}
+# Per-user cooldown scopes. Backed by ``newsdrop.state`` (Redis when
+# ``REDIS_URL`` is set, in-memory otherwise).
+SEARCH_RATE_LIMIT_SCOPE = "search"
 SEARCH_COOLDOWN_SECONDS = 10
 
-# Per-user cooldown for /news to protect the NewsData.io free-tier budget.
-_news_rate_limit: dict[int, float] = {}
+NEWS_RATE_LIMIT_SCOPE = "news"
 NEWS_COOLDOWN_SECONDS = 30
 
 MAX_FOLLOW_TOPIC_LENGTH = 40
@@ -170,10 +168,6 @@ def _effective_chat_id(update: Update) -> int | None:
     return chat.id if chat else None
 
 
-def _get_monotonic_time() -> float:
-    return asyncio.get_running_loop().time()
-
-
 def _parse_daily_time(value: str) -> time:
     try:
         parts = value.strip().split(":")
@@ -194,6 +188,37 @@ def _parse_daily_time(value: str) -> time:
 def _get_articles(payload: dict[str, Any]) -> list[Article]:
     articles = payload.get("articles", [])
     return articles if isinstance(articles, list) else []
+
+
+def _build_digest_payload(
+    data: NewsResponse,
+    category: str,
+    country: str,
+    followed_topics: list[str] | None = None,
+) -> tuple[str | None, str | None]:
+    """Return either a formatted HTML digest or an empty-state message.
+
+    Returns ``(digest, None)`` when articles are available and
+    ``(None, empty_message)`` otherwise. Centralizes the no-results
+    copy shared by ``/news`` and the scheduled daily job.
+    """
+    articles = _get_articles(data)
+    if articles:
+        return _format_news_digest(articles, category, country, followed_topics), None
+
+    sources_used = data.get("sources", []) if isinstance(data, dict) else []
+    if sources_used:
+        hint = "Try a different region or category with /setcountry /setcategory."
+    else:
+        hint = (
+            "The news service may be temporarily unavailable. "
+            "Try again later, or use /search &lt;topic&gt; for specific news."
+        )
+
+    return None, (
+        f"No {_escape_html(category)} news articles found for "
+        f"{_escape_html(country.upper())} right now.\n\n{hint}"
+    )
 
 
 def _get_article_key(article: Article) -> str:
@@ -247,9 +272,7 @@ def _build_read_more_keyboard(article: Article) -> InlineKeyboardMarkup | None:
     if not url:
         return None
 
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📖 Read full article", url=url)]]
-    )
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📖 Read full article", url=url)]])
 
 
 async def _build_trending_topic_rows(
@@ -262,17 +285,13 @@ async def _build_trending_topic_rows(
         if not safe_topic:
             continue
 
-        follow_action = (
-            "unfollow" if await is_following_topic(chat_id, safe_topic) else "follow"
-        )
+        follow_action = "unfollow" if await is_following_topic(chat_id, safe_topic) else "follow"
         follow_label = "➖ Unfollow" if follow_action == "unfollow" else "➕ Follow"
 
         rows.append(
             [
                 InlineKeyboardButton("🔍 Search", callback_data=f"search:{safe_topic}"),
-                InlineKeyboardButton(
-                    follow_label, callback_data=f"{follow_action}:{safe_topic}"
-                ),
+                InlineKeyboardButton(follow_label, callback_data=f"{follow_action}:{safe_topic}"),
             ]
         )
 
@@ -329,9 +348,7 @@ def _format_news_digest(
         # Card header: number + clickable bold title + inline meta
         if url:
             escaped_url = html.escape(url, quote=True)
-            lines.append(
-                f'<b>{i}.</b> <a href="{escaped_url}"><b>{title}</b></a>  ·  {meta_str}'
-            )
+            lines.append(f'<b>{i}.</b> <a href="{escaped_url}"><b>{title}</b></a>  ·  {meta_str}')
         else:
             lines.append(f"<b>{i}.</b> <b>{title}</b>  ·  {meta_str}")
 
@@ -355,14 +372,9 @@ def _format_news_digest(
             # fetch_breaking_news in news_fetcher.py.
             pattern = re.compile(rf"\b{re.escape(q)}\b")
             for article in shown:
-                blob = (
-                    f"{article.get('title', '')} "
-                    f"{article.get('description', '')}"
-                )
+                blob = f"{article.get('title', '')} {article.get('description', '')}"
                 if pattern.search(blob):
-                    matched.append(
-                        (topic, _escape_html(article.get("title", "No title")))
-                    )
+                    matched.append((topic, _escape_html(article.get("title", "No title"))))
                     break
 
         if matched:
@@ -439,9 +451,7 @@ async def _send_trending_results(
 
         message += "\n💡 Use the buttons below to search or follow a topic."
 
-        keyboard_rows = await _build_trending_topic_rows(
-            chat_id, list(trending_topics.keys())[:5]
-        )
+        keyboard_rows = await _build_trending_topic_rows(chat_id, list(trending_topics.keys())[:5])
 
         await message_target.reply_text(
             message,
@@ -450,9 +460,7 @@ async def _send_trending_results(
         )
     except Exception as exc:
         logger.error("Error fetching trending topics: %s", exc)
-        await status_msg.edit_text(
-            "🔧 Failed to fetch trending topics. Please try again later."
-        )
+        await status_msg.edit_text("🔧 Failed to fetch trending topics. Please try again later.")
 
 
 async def _clear_chat_messages(
@@ -496,11 +504,7 @@ async def _clear_chat_messages(
             return deleted, error_count
         except BadRequest as exc:
             s = str(exc).lower()
-            if (
-                "not found" in s
-                or "can't be deleted" in s
-                or "message is too old" in s
-            ):
+            if "not found" in s or "can't be deleted" in s or "message is too old" in s:
                 # Benign: already gone, never ours, or past the 48h window.
                 continue
             logger.warning("clear_chat BadRequest for message %s: %s", msg_id, exc)

@@ -23,6 +23,21 @@ from ..database import (
     remove_subscriber,
 )
 from ..message_utils import send_chunked_message
+from ..metrics import (
+    COMMAND_BREAKING_TOGGLE,
+    COMMAND_FOLLOW,
+    COMMAND_HEALTH,
+    COMMAND_NEWS,
+    COMMAND_SEARCH,
+    COMMAND_SUBSCRIBE,
+    COMMAND_TOTAL,
+    COMMAND_TRENDING,
+    COMMAND_UNFOLLOW,
+    COMMAND_UNSUBSCRIBE,
+    NEWS_API_ERRORS,
+    all_metrics,
+    increment,
+)
 from ..news_fetcher import (
     APIClientError,
     check_api_health,
@@ -31,22 +46,24 @@ from ..news_fetcher import (
     get_request_count,
     search_news,
 )
+from ..state import (
+    rate_limit_check,
+    rate_limit_record,
+)
 from .helpers import (
     NEWS_COOLDOWN_SECONDS,
+    NEWS_RATE_LIMIT_SCOPE,
     SEARCH_COOLDOWN_SECONDS,
+    SEARCH_RATE_LIMIT_SCOPE,
     TRENDING_CATEGORY_ALIASES,
     Prefs,
+    _build_digest_payload,
     _country_name_from_code,
     _effective_chat_id,
     _escape_html,
     _format_followed_topics,
-    _format_news_digest,
-    _get_articles,
-    _get_monotonic_time,
-    _news_rate_limit,
     _resolve_trending_category,
     _sanitize_follow_topic,
-    _search_rate_limit,
     _send_trending_results,
     logger,
 )
@@ -56,6 +73,8 @@ async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message:
         return
+
+    await increment(COMMAND_TOTAL)
 
     welcome = (
         "Welcome to Daily News Bot! 📰\n\n"
@@ -86,14 +105,14 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     if not message or chat_id is None:
         return
 
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_NEWS)
+
     # Per-user cooldown — same pattern as /search, but with a longer
     # window since /news fetches a full digest (higher API cost).
-    current_time = _get_monotonic_time()
-    last_call = _news_rate_limit.get(chat_id, 0.0)
-    if current_time - last_call < NEWS_COOLDOWN_SECONDS:
-        remaining = int(NEWS_COOLDOWN_SECONDS - (current_time - last_call))
+    if await rate_limit_check(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS):
         _ = await message.reply_text(
-            f"⏳ You're on a cooldown. Try again in {remaining} second(s). "
+            f"⏳ You're on a cooldown. Try again in {NEWS_COOLDOWN_SECONDS} second(s). "
             "Use /search for specific topics in the meantime."
         )
         return
@@ -107,26 +126,16 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         data = await fetch_top_headlines(country, category)
-        articles = _get_articles(data)
+        digest, empty_message = _build_digest_payload(data, category, country, followed)
 
-        if not articles:
-            sources_used = data.get("sources", []) if isinstance(data, dict) else []
-            if sources_used:
-                hint = "Try a different region or category with /setcountry /setcategory."
-            else:
-                hint = (
-                    "The news service may be temporarily unavailable. "
-                    "Try again later, or use /search &lt;topic&gt; for specific news."
-                )
+        if empty_message:
             _ = await status_msg.edit_text(
-                f"No {_escape_html(category)} news articles found for "
-                f"{_escape_html(country.upper())} right now.\n\n{hint}",
+                empty_message,
                 parse_mode=ParseMode.HTML,
             )
             return
 
-        digest = _format_news_digest(articles, category, country, followed)
-
+        assert digest is not None
         if len(digest) <= 4096:
             await status_msg.edit_text(
                 digest,
@@ -143,16 +152,15 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
             )
 
         # Record the successful call for cooldown tracking.
-        _news_rate_limit[chat_id] = _get_monotonic_time()
+        await rate_limit_record(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS)
 
     except APIClientError as exc:
+        await increment(NEWS_API_ERRORS)
         logger.error("News API error fetching news: %s", exc)
         _ = await status_msg.edit_text(str(exc))
     except Exception as exc:
         logger.exception("Unexpected error fetching news: %s", exc)
-        _ = await status_msg.edit_text(
-            "🔧 An unexpected error occurred. Please try again later."
-        )
+        _ = await status_msg.edit_text("🔧 An unexpected error occurred. Please try again later.")
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -161,17 +169,16 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not message or chat_id is None:
         return
 
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_SEARCH)
+
     if not context.args:
         _ = await message.reply_text("Usage: /search <topic>\nExample: /search bitcoin")
         return
 
-    current_time = _get_monotonic_time()
-    last_search = _search_rate_limit.get(chat_id, 0.0)
-
-    if current_time - last_search < SEARCH_COOLDOWN_SECONDS:
-        remaining = int(SEARCH_COOLDOWN_SECONDS - (current_time - last_search))
+    if await rate_limit_check(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
         _ = await message.reply_text(
-            f"⏳ Please wait {remaining} second(s) before searching again."
+            f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS} second(s) before searching again."
         )
         return
 
@@ -195,15 +202,14 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-        _search_rate_limit[chat_id] = _get_monotonic_time()
+        await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
     except APIClientError as exc:
+        await increment(NEWS_API_ERRORS)
         logger.error("News API error searching news: %s", exc)
         _ = await status_msg.edit_text(str(exc))
     except Exception as exc:
         logger.exception("Unexpected error searching news: %s", exc)
-        _ = await status_msg.edit_text(
-            "🔧 An unexpected error occurred. Please try again later."
-        )
+        _ = await status_msg.edit_text("🔧 An unexpected error occurred. Please try again later.")
 
 
 async def follow_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -211,6 +217,9 @@ async def follow_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = _effective_chat_id(update)
     if not message or chat_id is None:
         return
+
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_FOLLOW)
 
     if not context.args:
         _ = await message.reply_text("Usage: /follow <topic>\nExample: /follow AI")
@@ -234,6 +243,9 @@ async def unfollow_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message or chat_id is None:
         return
 
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_UNFOLLOW)
+
     if not context.args:
         _ = await message.reply_text("Usage: /unfollow <topic>\nExample: /unfollow AI")
         return
@@ -250,9 +262,7 @@ async def unfollow_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _ = await message.reply_text("⚠️ You are not following that topic.")
 
 
-async def list_followed_topics(
-    update: Update, _context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def list_followed_topics(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat_id = _effective_chat_id(update)
     if not message or chat_id is None:
@@ -265,9 +275,7 @@ async def list_followed_topics(
     )
 
 
-async def unfollow_all_topics(
-    update: Update, _context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def unfollow_all_topics(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """``/unfollowall`` — ask for confirmation, then remove ALL followed topics."""
     message = update.effective_message
     user = update.effective_user
@@ -342,6 +350,9 @@ async def subscribe(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None
     if not message or chat_id is None:
         return
 
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_SUBSCRIBE)
+
     if await is_subscriber(chat_id):
         _ = await message.reply_text("You are already subscribed to daily news!")
         return
@@ -360,6 +371,9 @@ async def unsubscribe(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = _effective_chat_id(update)
     if not message or chat_id is None:
         return
+
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_UNSUBSCRIBE)
 
     if not await is_subscriber(chat_id):
         _ = await message.reply_text("You are not subscribed to daily news.")
@@ -460,6 +474,9 @@ async def breaking_toggle(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
     if not message or chat_id is None:
         return
 
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_BREAKING_TOGGLE)
+
     current_enabled = await get_breaking_news_preference(chat_id)
     keyboard = InlineKeyboardMarkup(
         [
@@ -488,6 +505,9 @@ async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not message or chat_id is None:
         return
 
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_TRENDING)
+
     raw_category = context.args[0] if context.args else ""
     raw_country = context.args[1] if len(context.args) >= 2 else None
 
@@ -500,9 +520,7 @@ async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if category is None:
         supported = ", ".join(sorted(TRENDING_CATEGORY_ALIASES.keys()))
-        _ = await message.reply_text(
-            f"⚠️ Unknown trending category.\n\nTry one of: {supported}"
-        )
+        _ = await message.reply_text(f"⚠️ Unknown trending category.\n\nTry one of: {supported}")
         return
 
     await _send_trending_results(message, chat_id, category, country)
@@ -513,12 +531,15 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     if not message:
         return
 
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_HEALTH)
+
     status_msg = await message.reply_text("🏥 Checking bot health...")
 
     try:
         api_health = await check_api_health()
         db_health = await check_db_health()
-        request_count, request_limit = get_request_count()
+        request_count, request_limit = await get_request_count()
 
         _ = await status_msg.delete()
 
@@ -526,8 +547,7 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         db_emoji = "✅" if db_health["status"] == "healthy" else "❌"
 
         health_message = (
-            "🏥 <b>Bot Health Status</b>\n\n"
-            f"{api_emoji} NewsData.io: {api_health['status']}"
+            f"🏥 <b>Bot Health Status</b>\n\n{api_emoji} NewsData.io: {api_health['status']}"
         )
 
         if api_health["status"] == "healthy":
@@ -538,12 +558,8 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         health_message += f"\n{db_emoji} Database: {db_health['status']}"
 
         if db_health["status"] == "healthy":
-            health_message += (
-                f"\n   Subscribers: {db_health.get('subscriber_count', '0')}"
-            )
-            health_message += (
-                f"\n   Followed topics: {db_health.get('followed_topic_count', '0')}"
-            )
+            health_message += f"\n   Subscribers: {db_health.get('subscriber_count', '0')}"
+            health_message += f"\n   Followed topics: {db_health.get('followed_topic_count', '0')}"
             health_message += (
                 f"\n   Breaking alerts tracked: {db_health.get('breaking_alert_count', '0')}"
             )
@@ -553,6 +569,13 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         health_message += f"\n\n📊 API Requests: {request_count}/{request_limit} today"
         health_message += "\n📊 Cache: Active (5min TTL)\n"
         health_message += "🤖 Bot: Running"
+
+        metrics = await all_metrics()
+        health_message += "\n\n📈 <b>Metrics</b>"
+        health_message += f"\n  Commands: {metrics.get(COMMAND_TOTAL, 0)}"
+        health_message += f"\n  /news: {metrics.get(COMMAND_NEWS, 0)}"
+        health_message += f"\n  /search: {metrics.get(COMMAND_SEARCH, 0)}"
+        health_message += f"\n  News API errors: {metrics.get(NEWS_API_ERRORS, 0)}"
 
         _ = await message.reply_text(health_message, parse_mode=ParseMode.HTML)
 
