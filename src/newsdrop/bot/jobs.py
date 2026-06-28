@@ -12,6 +12,7 @@ from ..config import (
 )
 from ..database import (
     cleanup_old_breaking_alerts,
+    get_followed_topics,
     get_user_prefs,
     load_breaking_news_subscribers,
     load_subscribers,
@@ -139,7 +140,8 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 continue
 
-            digest = _format_news_digest(articles, category, country)
+            followed = await get_followed_topics(chat_id)
+            digest = _format_news_digest(articles, category, country, followed)
 
             if len(digest) <= 4096:
                 _ = await context.bot.send_message(

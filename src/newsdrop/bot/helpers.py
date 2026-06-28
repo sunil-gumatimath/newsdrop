@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 from datetime import UTC, datetime, time
 from typing import Any
 from urllib.parse import urlparse
@@ -292,22 +293,26 @@ def _format_news_digest(
     articles: list[Article],
     category: str,
     country: str,
+    followed_topics: list[str] | None = None,
 ) -> str:
     """Format articles into clean HTML card digest message.
 
     Each article is rendered as a compact card: clickable bold title with
     inline time/source meta on the same line, an indented description
-    below, and blank-line separators between cards.
+    below, and blank-line separators between cards.  If *followed_topics*
+    is provided, a highlight section is appended showing which of the
+    user's followed topics appear in today's headlines.
     """
     cat_label = _category_label(category)
+    shown = articles[:10]
 
     lines: list[str] = [
         f"📰 <b>Daily News Briefing</b>  ·  {_escape_html(cat_label)} "
-        f"({_escape_html(country.upper())})",
+        f"({_escape_html(country.upper())})  ·  {len(shown)} articles",
         "",
     ]
 
-    for i, article in enumerate(articles[:10], 1):
+    for i, article in enumerate(shown, 1):
         title = _escape_html(article.get("title", "No title"))
         _, source_escaped = _get_source_name(article)
         rel_time = _format_relative_time(str(article.get("publishedAt", "")))
@@ -336,7 +341,38 @@ def _format_news_digest(
 
         lines.append("")
 
-    lines.append("💡 /search &lt;topic&gt; · /prefs to customize")
+    # Followed-topics highlight: zero-cost filter over already-fetched
+    # articles.  Shows which of the user's interests appear in today's
+    # headlines so /follow has tangible value in the daily briefing.
+    if followed_topics:
+        matched: list[tuple[str, str]] = []
+        for topic in followed_topics:
+            q = topic.lower().strip()
+            if not q:
+                continue
+            # Word-boundary match to avoid false positives like "ai"
+            # matching "rain" or "trail".  Same pattern used by
+            # fetch_breaking_news in news_fetcher.py.
+            pattern = re.compile(rf"\b{re.escape(q)}\b")
+            for article in shown:
+                blob = (
+                    f"{article.get('title', '')} "
+                    f"{article.get('description', '')}"
+                )
+                if pattern.search(blob):
+                    matched.append(
+                        (topic, _escape_html(article.get("title", "No title")))
+                    )
+                    break
+
+        if matched:
+            lines.append("📌 <b>From your followed topics</b>")
+            lines.append("")
+            for topic, title in matched[:5]:
+                lines.append(f"  · #{_escape_html(topic)} — {title}")
+            lines.append("")
+
+    lines.append("💡 /search topic · /prefs to customize")
     return "\n".join(lines)
 
 

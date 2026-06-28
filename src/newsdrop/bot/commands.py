@@ -75,6 +75,11 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     Instead of spamming 10+ individual messages (photo + caption + button),
     this builds one well-formatted HTML digest with clickable article links,
     brief descriptions, source, and relative time — all in one message.
+
+    A per-user cooldown (``NEWS_COOLDOWN_SECONDS``) protects the
+    NewsData.io free-tier budget from spam.  The user's followed topics
+    are highlighted in a separate section so ``/follow`` has tangible
+    value in the daily briefing.
     """
     message = update.effective_message
     chat_id = _effective_chat_id(update)
@@ -96,6 +101,7 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     prefs: Prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     country = prefs.get("country", DEFAULT_COUNTRY)
     category = prefs.get("category", "general")
+    followed = await get_followed_topics(chat_id)
 
     status_msg = await message.reply_text("📰 Fetching latest news...")
 
@@ -110,7 +116,7 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        digest = _format_news_digest(articles, category, country)
+        digest = _format_news_digest(articles, category, country, followed)
 
         if len(digest) <= 4096:
             await status_msg.edit_text(
