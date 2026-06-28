@@ -184,6 +184,8 @@ Configure these settings inside your `.env` file (or pass them via environment v
 | `DATABASE_PATH` | `bot_data.db` | SQLite database location. Docker maps this to `/app/data/bot_data.db` |
 | `ENABLE_RSS` | `1` | Enables RSS fallbacks and multi-source aggregation. Set to `0` to disable |
 | `DAILY_REQUEST_LIMIT` | `200` | Local request limit to stay within free NewsData.io tier. Set to `0` to disable |
+| `NEWS_COOLDOWN_SECONDS` | `30` | Per-user cooldown for `/news` to prevent accidental budget burn. Set to `0` to disable |
+| `SEARCH_COOLDOWN_SECONDS` | `10` | Per-user cooldown for `/search` (and trending-topic search buttons). Set to `0` to disable |
 | `BREAKING_ALERT_INTERVAL_MINUTES` | `30` | Interval to check for breaking news alerts. Set to `0` to disable |
 | `BREAKING_ALERT_RETENTION_DAYS` | `14` | Days to retain sent alert hashes to prevent duplicate alerts |
 | `BREAKING_ALERT_KEYWORDS` | *Built-in list* | Comma-separated words to detect breaking stories (e.g. `breaking,war,earthquake`) |
