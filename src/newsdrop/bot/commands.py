@@ -110,9 +110,18 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         articles = _get_articles(data)
 
         if not articles:
+            sources_used = data.get("sources", []) if isinstance(data, dict) else []
+            if sources_used:
+                hint = "Try a different region or category with /setcountry /setcategory."
+            else:
+                hint = (
+                    "The news service may be temporarily unavailable. "
+                    "Try again later, or use /search &lt;topic&gt; for specific news."
+                )
             _ = await status_msg.edit_text(
                 f"No {_escape_html(category)} news articles found for "
-                f"{_escape_html(country.upper())}. Try again later."
+                f"{_escape_html(country.upper())} right now.\n\n{hint}",
+                parse_mode=ParseMode.HTML,
             )
             return
 
