@@ -19,6 +19,8 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 
 from ..config import (
     COUNTRIES,
+    NEWS_COOLDOWN_SECONDS as _NEWS_COOLDOWN_SECONDS,
+    SEARCH_COOLDOWN_SECONDS as _SEARCH_COOLDOWN_SECONDS,
 )
 from ..database import (
     is_following_topic,
@@ -39,12 +41,14 @@ NewsResponse = dict[str, Any]
 Prefs = dict[str, str]
 
 # Per-user cooldown scopes. Backed by ``newsdrop.state`` (Redis when
-# ``REDIS_URL`` is set, in-memory otherwise).
+# ``REDIS_URL`` is set, in-memory otherwise). The cooldown window length is
+# tunable via the ``NEWS_COOLDOWN_SECONDS`` / ``SEARCH_COOLDOWN_SECONDS`` env
+# vars (see config.py); 0 disables the cooldown entirely.
 SEARCH_RATE_LIMIT_SCOPE = "search"
-SEARCH_COOLDOWN_SECONDS = 10
+SEARCH_COOLDOWN_SECONDS = _SEARCH_COOLDOWN_SECONDS
 
 NEWS_RATE_LIMIT_SCOPE = "news"
-NEWS_COOLDOWN_SECONDS = 30
+NEWS_COOLDOWN_SECONDS = _NEWS_COOLDOWN_SECONDS
 
 MAX_FOLLOW_TOPIC_LENGTH = 40
 

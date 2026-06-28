@@ -25,6 +25,12 @@ ENABLE_RSS = os.getenv("ENABLE_RSS", "1") not in ("0", "false", "False", "no")
 # NewsData.io free tier request budget. Set to 0 to disable local request limiting.
 DAILY_REQUEST_LIMIT = int(os.getenv("DAILY_REQUEST_LIMIT", "200"))
 
+# Per-user command cooldowns (seconds). Protects against accidental spam that
+# would burn the upstream daily budget. Set to 0 to disable a cooldown entirely
+# (e.g. solo self-hosted deployments where the friction isn't useful).
+NEWS_COOLDOWN_SECONDS = int(os.getenv("NEWS_COOLDOWN_SECONDS", "30"))
+SEARCH_COOLDOWN_SECONDS = int(os.getenv("SEARCH_COOLDOWN_SECONDS", "10"))
+
 # Breaking-news alert settings.
 BREAKING_ALERT_INTERVAL_MINUTES = int(os.getenv("BREAKING_ALERT_INTERVAL_MINUTES", "30"))
 BREAKING_ALERT_RETENTION_DAYS = int(os.getenv("BREAKING_ALERT_RETENTION_DAYS", "14"))
