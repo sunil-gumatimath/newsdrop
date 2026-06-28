@@ -1,33 +1,9 @@
-"""
-newsdrop news fetcher.
+"""newsdrop news fetcher.
 
-DEPLOYMENT WARNING — SINGLE-WORKER ONLY
-========================================
-This module holds the following state in process-local memory (Python globals):
-    - _cache              : dict[str, tuple[datetime, NewsResponse]]
-                            — LRU-ish cache of API responses
-    - _daily_request_count: int
-                            — count of NewsData.io requests used today
-    - _daily_request_date : datetime.date
-                            — the calendar date the counter is for
-    - ... (add any others you find)
-
-If you run multiple bot workers / replicas (e.g. `docker-compose up --scale bot=3`,
-or a Kubernetes Deployment with replicas > 1), EACH worker will have its OWN copy
-of these structures. Result: API responses will be re-fetched N times (one per
-worker), the daily NewsData.io request budget will be split across N counters
-(so DAILY_REQUEST_LIMIT effectively becomes N × configured limit per real user,
-but you'll burn through your real paid/free quota N× faster), and the cache
-will be effectively N× smaller.
-
-The cache is process-local. With N workers, the effective cache hit rate is
-divided by N. Daily request counters will also be per-worker, so
-DAILY_REQUEST_LIMIT effectively becomes N × configured limit. Workers in
-dev/staging should not be scaled until Redis lands.
-
-To run more than one worker, you must move this state to a shared backend
-(Redis is the obvious choice). See TODO-2026Q2 in the project notes — until
-that lands, the official deployment is `docker-compose up` (one bot replica).
+Shared state (API response cache and daily request budget) lives in
+``newsdrop.state`` so the bot can run multiple workers when Redis is
+configured. With no ``REDIS_URL`` set, the state module falls back to an
+in-memory backend for local / single-worker deployments.
 """
 
 # pyright: reportMissingImports=false
@@ -37,7 +13,6 @@ import asyncio
 import html
 import logging
 import re
-from datetime import date, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -51,6 +26,13 @@ from .config import (
     WORD_RE,
 )
 from .rss_feeds import fetch_rss_articles, has_rss_for
+from .state import (
+    api_budget_check,
+    api_request_consume,
+    api_request_count,
+    cache_get,
+    cache_set,
+)
 
 Article = dict[str, Any]
 NewsResponse = dict[str, Any]
@@ -58,8 +40,6 @@ Params = dict[str, str | int]
 
 NEWS_LATEST_URL = "https://newsdata.io/api/1/latest"
 
-# IN-MEMORY ONLY — see module docstring; move to Redis before scaling out.
-_cache: dict[str, tuple[datetime, NewsResponse]] = {}
 CACHE_TTL_SECONDS = 300  # 5 minutes
 HTTP_TIMEOUT_SECONDS = 15.0
 
@@ -79,11 +59,7 @@ CATEGORY_MAP = {
 
 logger = logging.getLogger(__name__)
 
-# Daily API request tracking for free-tier protection
-# IN-MEMORY ONLY — see module docstring; move to Redis before scaling out.
-_daily_request_count = 0
-# IN-MEMORY ONLY — see module docstring; move to Redis before scaling out.
-_daily_request_date = date.today()
+# Daily API request tracking for free-tier protection.
 _request_limit = DAILY_REQUEST_LIMIT if DAILY_REQUEST_LIMIT > 0 else 200
 
 
@@ -104,34 +80,9 @@ class APIClientError(Exception):
         self.api_code = api_code
 
 
-def _check_rate_limit() -> bool:
-    """Check whether another API request may be made today."""
-    global _daily_request_count, _daily_request_date
-
-    today = date.today()
-    if today != _daily_request_date:
-        _daily_request_count = 0
-        _daily_request_date = today
-
-    return _daily_request_count < _request_limit
-
-
-def _increment_request_count() -> None:
-    global _daily_request_count
-    _daily_request_count += 1
-
-
-def get_request_count() -> tuple[int, int]:
+async def get_request_count() -> tuple[int, int]:
     """Return current daily request usage and limit."""
-    global _daily_request_count, _daily_request_date
-
-    today = date.today()
-    if today != _daily_request_date:
-        _daily_request_count = 0
-        _daily_request_date = today
-
-    return _daily_request_count, _request_limit
-
+    return await api_request_count(_request_limit)
 
 
 def _escape_text(value: object) -> str:
@@ -179,23 +130,6 @@ def _truncate_text(text: str, max_length: int) -> str:
 
 def _get_cache_key(params: Params) -> str:
     return "&".join(f"{k}={v}" for k, v in sorted(params.items()) if k != "apikey")
-
-
-def _get_from_cache(key: str) -> NewsResponse | None:
-    cached = _cache.get(key)
-    if cached is None:
-        return None
-
-    ts, data = cached
-    if (datetime.now() - ts).total_seconds() < CACHE_TTL_SECONDS:
-        return data
-
-    del _cache[key]
-    return None
-
-
-def _set_cache(key: str, data: NewsResponse) -> None:
-    _cache[key] = (datetime.now(), data)
 
 
 def _classify_api_error(status_code: int, body: NewsResponse) -> str:
@@ -252,9 +186,7 @@ def _normalize_article(article: Article) -> Article:
 def _normalize_response(data: NewsResponse) -> NewsResponse:
     raw_results = data.get("results", [])
     results: list[Article] = raw_results if isinstance(raw_results, list) else []
-    articles = [
-        _normalize_article(article) for article in results if isinstance(article, dict)
-    ]
+    articles = [_normalize_article(article) for article in results if isinstance(article, dict)]
 
     return {
         "status": data.get("status", "success"),
@@ -266,12 +198,12 @@ def _normalize_response(data: NewsResponse) -> NewsResponse:
 
 async def _fetch_news(params: Params) -> NewsResponse:
     cache_key = _get_cache_key(params)
-    cached = _get_from_cache(cache_key)
-    if cached is not None:
+    cached = await cache_get(cache_key)
+    if isinstance(cached, dict):
         return cached
 
-    if not _check_rate_limit():
-        current, limit = get_request_count()
+    if not await api_budget_check(_request_limit):
+        current, limit = await get_request_count()
         raise APIClientError(
             f"Daily API request limit reached ({current}/{limit}). "
             "Please try again tomorrow or disable RSS fallback if needed.",
@@ -304,10 +236,7 @@ async def _fetch_news(params: Params) -> NewsResponse:
                 f"News service returned unexpected response shape (HTTP {response.status_code})"
             )
 
-        if (
-            response.status_code != 200
-            or str(data.get("status", "")).lower() == "error"
-        ):
+        if response.status_code != 200 or str(data.get("status", "")).lower() == "error":
             raise APIClientError(
                 _classify_api_error(response.status_code, data),
                 status_code=response.status_code,
@@ -315,8 +244,8 @@ async def _fetch_news(params: Params) -> NewsResponse:
             )
 
         normalized = _normalize_response(data)
-        _set_cache(cache_key, normalized)
-        _increment_request_count()
+        await cache_set(cache_key, normalized, CACHE_TTL_SECONDS)
+        await api_request_consume(_request_limit)
         return normalized
 
 
@@ -489,8 +418,6 @@ async def search_news(query: str, country: str = "us") -> NewsResponse:
     }
 
 
-
-
 def format_search_results(data: NewsResponse, query: str) -> str:
     raw_articles = data.get("articles", [])
     articles: list[Article] = raw_articles if isinstance(raw_articles, list) else []
@@ -529,9 +456,7 @@ def get_article_image(article: Article) -> str | None:
     return None
 
 
-async def fetch_breaking_news(
-    countries: list[str], keywords: list[str]
-) -> list[Article]:
+async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list[Article]:
     # P1 #3 — guard against API budget exhaustion.
     # BREAKING_ALERT_INTERVAL_MINUTES (default 30) means the cron fires 48x/day.
     # Without this gate, N countries × 48 cycles can blow past DAILY_REQUEST_LIMIT.
@@ -546,8 +471,8 @@ async def fetch_breaking_news(
         # Rate-limit gate: if the daily budget is gone, log once and bail out
         # of the whole country loop (do not "continue" — remaining countries
         # would just hit the same gate and spam the log).
-        if not _check_rate_limit():
-            current, limit = get_request_count()
+        if not await api_budget_check(_request_limit):
+            current, limit = await get_request_count()
             logger.warning(
                 "Breaking-news fetch skipped for %s: daily budget exhausted "
                 "(%s/%s). Remaining countries will be skipped this cycle.",
@@ -565,7 +490,7 @@ async def fetch_breaking_news(
         }
 
         cache_key = _get_cache_key(params)
-        cached = _get_from_cache(cache_key)
+        cached = await cache_get(cache_key)
         if cached:
             raw_articles = cached.get("articles", [])
             articles = raw_articles if isinstance(raw_articles, list) else []
@@ -591,18 +516,12 @@ async def fetch_breaking_news(
             # those headlines are rare in /news and one FP/day beats dozens
             # of "attack ad" hits.
             matched = [
-                kw
-                for kw in keywords
-                if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
+                kw for kw in keywords if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
             ]
             # Require the keyword to land in the title, OR have at least two
             # distinct keywords hit anywhere in title+description (a strong
             # signal that the article is genuinely about a tracked topic).
-            title_hits = [
-                kw
-                for kw in matched
-                if re.search(rf"\b{re.escape(kw.lower())}\b", title)
-            ]
+            title_hits = [kw for kw in matched if re.search(rf"\b{re.escape(kw.lower())}\b", title)]
             if title_hits or len(matched) >= 2:
                 tagged = dict(article)
                 tagged["country"] = country
@@ -743,9 +662,7 @@ def extract_keywords(text: str) -> list[str]:
     return [word for word in words if len(word) > 2 and word not in common_words]
 
 
-async def fetch_trending_topics(
-    countries: list[str], category: str = "general"
-) -> dict[str, int]:
+async def fetch_trending_topics(countries: list[str], category: str = "general") -> dict[str, int]:
     keyword_counts: dict[str, int] = {}
     mapped_category = CATEGORY_MAP.get(category, category)
 
@@ -761,7 +678,7 @@ async def fetch_trending_topics(
             params["category"] = mapped_category
 
         cache_key = _get_cache_key(params)
-        cached = _get_from_cache(cache_key)
+        cached = await cache_get(cache_key)
         if cached:
             raw_articles = cached.get("articles", [])
             articles = raw_articles if isinstance(raw_articles, list) else []

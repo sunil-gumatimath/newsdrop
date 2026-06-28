@@ -19,7 +19,7 @@ if _SRC_PATH_STR not in sys.path:
 import pytest
 
 from newsdrop import database as _database_mod
-from newsdrop import news_fetcher as _news_fetcher_mod
+from newsdrop import state as _state_mod
 
 
 def _cleanup_pre_import_db() -> None:
@@ -50,8 +50,6 @@ def tmp_db(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_rate_limit_state():
-    _news_fetcher_mod._daily_request_count = 0
-    _news_fetcher_mod._cache.clear()
+    _state_mod.reset_backend()
     yield
-    _news_fetcher_mod._daily_request_count = 0
-    _news_fetcher_mod._cache.clear()
+    _state_mod.reset_backend()
