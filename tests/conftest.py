@@ -17,6 +17,7 @@ if _SRC_PATH_STR not in sys.path:
     sys.path.insert(0, _SRC_PATH_STR)
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from newsdrop import database as _database_mod
 from newsdrop import state as _state_mod
@@ -53,3 +54,56 @@ def _isolate_rate_limit_state():
     _state_mod.reset_backend()
     yield
     _state_mod.reset_backend()
+
+
+@pytest.fixture
+def mock_httpx_client():
+    """Provide an AsyncMock httpx.AsyncClient with common response defaults.
+
+    Usage::
+
+        async def test_something(mock_httpx_client):
+            mock_httpx_client.get.return_value = mock_httpx_client.Response(
+                status_code=200,
+                text="<rss>...</rss>",
+            )
+    """
+    client = AsyncMock()
+    response = MagicMock()
+    response.status_code = 200
+    response.text = ""
+    response.json.return_value = {}
+    response.headers = {}
+    response.raise_for_status = MagicMock()
+    client.Response = MagicMock(return_value=response)
+    client.get = AsyncMock(return_value=response)
+    client.post = AsyncMock(return_value=response)
+    client.request = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    return client
+
+
+@pytest.fixture
+def mock_telegram_update():
+    """Provide a MagicMock representing a Telegram Update with message context.
+
+    Sets up ``effective_message``, ``effective_chat``, and ``effective_user``
+    with sensible defaults so tests can read attributes or call methods
+    without additional setup.
+    """
+    update = MagicMock()
+    update.effective_message = MagicMock()
+    update.effective_message.message_id = 1
+    update.effective_message.text = "/test"
+    update.effective_message.reply_text = AsyncMock()
+    update.effective_message.reply_html = AsyncMock()
+    update.effective_message.answer = AsyncMock()
+    update.effective_chat = MagicMock()
+    update.effective_chat.id = 123456
+    update.effective_chat.type = "private"
+    update.effective_user = MagicMock()
+    update.effective_user.id = 789012
+    update.effective_user.first_name = "Test"
+    update.effective_user.username = "testuser"
+    return update
