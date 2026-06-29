@@ -7,6 +7,10 @@
 *.db
 *.sqlite3
 
+# Coverage
+.coverage
+htmlcov/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,11 +1,37 @@
-.env
-.git
-__pycache__
-*.pyc
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
 .venv/
-data/
-*.db
-*.sqlite3
+venv/
+*.egg
+
+# Tests
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
 .vscode/
 .idea/
-*.log
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs
+*.md
+!README.md
+LICENSE
