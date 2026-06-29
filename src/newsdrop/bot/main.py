@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import signal
 import sys
+import threading
 from typing import Any, cast
 
 from telegram import BotCommand, Update
@@ -38,6 +40,7 @@ from .commands import (
     unfollow_topic,
     unsubscribe,
 )
+from .health_server import start_health_server, set_ready
 from .helpers import (
     _parse_daily_time,
     logger,
@@ -149,6 +152,32 @@ def main() -> None:
     else:
         logger.info("Breaking news alerts are disabled by configuration.")
 
+    # Start HTTP health server for Docker/container orchestration.
+    health_server = start_health_server()
+
+    # Mark the application as ready so /ready returns 200.
+    set_ready(True)
+
+    # Graceful shutdown: stop the job queue and polling loop on SIGTERM/SIGINT.
+    shutdown_event = threading.Event()
+
+    def _shutdown(signum: int, frame: object) -> None:
+        sig_name = signal.Signals(signum).name
+        logger.info("Received %s — initiating graceful shutdown...", sig_name)
+        set_ready(False)
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     logger.info("Daily news scheduled for %s", DAILY_NEWS_TIME)
     logger.info("Bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # After polling stops (e.g. via shutdown signal), clean up.
+    logger.info("Stopping job queue...")
+    if app.job_queue is not None:
+        app.job_queue.scheduler.running = False
+
+    health_server.shutdown()
+    logger.info("Bot shut down cleanly.")
