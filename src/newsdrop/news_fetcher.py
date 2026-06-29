@@ -211,47 +211,71 @@ async def _fetch_news(params: Params) -> NewsResponse:
             api_code="RateLimitExceeded",
         )
 
-    timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
-    async with httpx.AsyncClient(timeout=timeout, max_redirects=5) as client:
+    max_attempts = 3
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
         try:
-            response = await client.get(NEWS_LATEST_URL, params=params)
-        except httpx.TimeoutException as exc:
-            raise APIClientError(
-                "⏳ The news service took too long to respond. Please try again."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise APIClientError(
-                "🔌 Unable to reach the news service right now. Please try again later."
-            ) from exc
+            timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
+            async with httpx.AsyncClient(timeout=timeout, max_redirects=5) as client:
+                try:
+                    response = await client.get(NEWS_LATEST_URL, params=params)
+                except httpx.TimeoutException as exc:
+                    raise APIClientError(
+                        "⏳ The news service took too long to respond. Please try again."
+                    ) from exc
+                except httpx.HTTPError as exc:
+                    raise APIClientError(
+                        "🔌 Unable to reach the news service right now. Please try again later."
+                    ) from exc
 
-        try:
-            # Enforce 2MB response size cap before parsing
-            if len(response.content) >= 2_000_000:
-                raise APIClientError(
-                    "⚠️ The news service returned an unexpectedly large response. Please try again later."
+                try:
+                    # Enforce 2MB response size cap before parsing
+                    if len(response.content) >= 2_000_000:
+                        raise APIClientError(
+                            "⚠️ The news service returned an unexpectedly large response. Please try again later."
+                        )
+                    data = response.json()
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"News service returned invalid response (HTTP {response.status_code})"
+                    ) from exc
+
+                if not isinstance(data, dict):
+                    raise RuntimeError(
+                        f"News service returned unexpected response shape (HTTP {response.status_code})"
+                    )
+
+                if response.status_code != 200 or str(data.get("status", "")).lower() == "error":
+                    raise APIClientError(
+                        _classify_api_error(response.status_code, data),
+                        status_code=response.status_code,
+                        api_code=str(data.get("code", "")) or None,
+                    )
+
+                normalized = _normalize_response(data)
+                await cache_set(cache_key, normalized, CACHE_TTL_SECONDS)
+                await api_request_consume(_request_limit)
+                return normalized
+
+        except (APIClientError, RuntimeError) as exc:
+            last_exc = exc
+            # Retry only on 5xx or transport errors. 4xx errors (auth, rate-limit)
+            # won't resolve with retry.
+            status = getattr(exc, "status_code", None)
+            if status is not None and 400 <= status < 500 and status != 429:
+                raise
+            if attempt < max_attempts - 1:
+                delay = 2 ** attempt  # 1s, 2s
+                logger.warning(
+                    "NewsData.io fetch attempt %d/%d failed (%s). Retrying in %ds...",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                    delay,
                 )
-            data = response.json()
-        except Exception as exc:
-            raise RuntimeError(
-                f"News service returned invalid response (HTTP {response.status_code})"
-            ) from exc
+                await asyncio.sleep(delay)
 
-        if not isinstance(data, dict):
-            raise RuntimeError(
-                f"News service returned unexpected response shape (HTTP {response.status_code})"
-            )
-
-        if response.status_code != 200 or str(data.get("status", "")).lower() == "error":
-            raise APIClientError(
-                _classify_api_error(response.status_code, data),
-                status_code=response.status_code,
-                api_code=str(data.get("code", "")) or None,
-            )
-
-        normalized = _normalize_response(data)
-        await cache_set(cache_key, normalized, CACHE_TTL_SECONDS)
-        await api_request_consume(_request_limit)
-        return normalized
+    raise last_exc  # type: ignore[misc]
 
 
 def _normalize_title(title: str) -> str:
