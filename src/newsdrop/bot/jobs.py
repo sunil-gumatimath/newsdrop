@@ -166,7 +166,7 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
             with contextlib.suppress(Exception):
                 _ = await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"⚠️ Error fetching today's news: {exc}",
+                    text="⚠️ Could not fetch today's news. Please try again later.",
                 )
         except Exception as exc:
             logger.exception("Failed to send news to %s: %s", chat_id, exc)

@@ -30,10 +30,6 @@ from ..news_fetcher import (
     get_article_image,
 )
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
 logger = logging.getLogger(__name__)
 
 Article = dict[str, Any]
@@ -291,6 +287,18 @@ async def _build_trending_topic_rows(
 
         follow_action = "unfollow" if await is_following_topic(chat_id, safe_topic) else "follow"
         follow_label = "➖ Unfollow" if follow_action == "unfollow" else "➕ Follow"
+
+        # Ensure callback_data stays within Telegram's 64-byte limit.
+        for prefix in (f"search:{safe_topic}", f"{follow_action}:{safe_topic}"):
+            if len(prefix.encode("utf-8")) > 64:
+                # Truncate topic to fit within 64 bytes with the prefix.
+                prefix_bytes = prefix.encode("utf-8")
+                topic_bytes = safe_topic.encode("utf-8")
+                overflow = len(prefix_bytes) - 64
+                safe_topic = topic_bytes[:len(topic_bytes) - overflow - 1].decode("utf-8", errors="ignore")
+                follow_action = "unfollow" if await is_following_topic(chat_id, safe_topic) else "follow"
+                follow_label = "➖ Unfollow" if follow_action == "unfollow" else "➕ Follow"
+                break
 
         rows.append(
             [

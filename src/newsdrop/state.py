@@ -102,6 +102,13 @@ class _MemoryBackend(StateBackend):
 
     async def set_cache(self, key: str, value: StateValue, ttl_seconds: int) -> None:
         async with self._lock:
+            # Evict oldest 20% when cache exceeds 10,000 keys.
+            if len(self._cache) >= 10_000 and key not in self._cache:
+                sorted_keys = sorted(self._cache, k=lambda k: self._cache[k][0])
+                evict_count = max(1, len(sorted_keys) // 5)
+                for old_key in sorted_keys[:evict_count]:
+                    del self._cache[old_key]
+                logger.info("Cache eviction: removed %d entries", evict_count)
             self._cache[key] = (datetime.now(), value, ttl_seconds)
 
     async def check_api_budget(self, limit: int) -> bool:
@@ -124,6 +131,18 @@ class _MemoryBackend(StateBackend):
 
     async def is_rate_limited(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
         async with self._lock:
+            # Periodic cleanup of expired entries (amortized on each check).
+            if len(self._rate_limits) > 5000:
+                loop = asyncio.get_running_loop()
+                now = loop.time()
+                expired = [
+                    k for k, ts in self._rate_limits.items()
+                    if (now - ts) >= cooldown_seconds
+                ]
+                for k in expired:
+                    del self._rate_limits[k]
+                if expired:
+                    logger.info("Rate-limit cleanup: removed %d expired entries", len(expired))
             last_call = self._rate_limits.get(self._key(scope, str(chat_id)), 0.0)
             loop = asyncio.get_running_loop()
             return (loop.time() - last_call) < cooldown_seconds
@@ -149,7 +168,7 @@ class _RedisBackend(StateBackend):
             raise RuntimeError(
                 "redis package is required when REDIS_URL is set; install with pip install redis"
             )
-        self._redis = Redis.from_url(url, decode_responses=True)
+        self._redis = Redis.from_url(url, decode_responses=True, socket_timeout=5)
 
     @staticmethod
     def _key(*parts: str) -> str:

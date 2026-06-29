@@ -115,8 +115,8 @@ async def _handle_search_callback(
         )
         await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
     except APIClientError as exc:
-        logger.error("News API error searching news: %s", exc)
-        _ = await status_msg.edit_text(str(exc))
+        logger.exception("Callback search failed")
+        _ = await status_msg.edit_text("🔧 Could not fetch news. Please try again later.")
     except Exception as exc:
         logger.exception("Unexpected error searching news: %s", exc)
         _ = await status_msg.edit_text("🔧 An unexpected error occurred. Please try again later.")

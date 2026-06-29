@@ -156,8 +156,8 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
     except APIClientError as exc:
         await increment(NEWS_API_ERRORS)
-        logger.error("News API error fetching news: %s", exc)
-        _ = await status_msg.edit_text(str(exc))
+        logger.exception("Failed to fetch news")
+        _ = await status_msg.edit_text("🔧 Could not fetch news. Please try again later.")
     except Exception as exc:
         logger.exception("Unexpected error fetching news: %s", exc)
         _ = await status_msg.edit_text("🔧 An unexpected error occurred. Please try again later.")
@@ -187,6 +187,10 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _ = await message.reply_text("Usage: /search <topic>\nExample: /search bitcoin")
         return
 
+    if len(query) > 200:
+        _ = await message.reply_text("⚠️ Query too long (max 200 characters).")
+        return
+
     prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     country = prefs.get("country", DEFAULT_COUNTRY)
 
@@ -205,8 +209,8 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
     except APIClientError as exc:
         await increment(NEWS_API_ERRORS)
-        logger.error("News API error searching news: %s", exc)
-        _ = await status_msg.edit_text(str(exc))
+        logger.exception("Failed to search news")
+        _ = await status_msg.edit_text("🔧 Could not fetch news. Please try again later.")
     except Exception as exc:
         logger.exception("Unexpected error searching news: %s", exc)
         _ = await status_msg.edit_text("🔧 An unexpected error occurred. Please try again later.")
@@ -553,7 +557,7 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if api_health["status"] == "healthy":
             health_message += f" ({api_health.get('response_time', 'N/A')})"
         else:
-            health_message += f"\n   Error: {api_health.get('error', 'Unknown')}"
+            logger.warning("API health check error: %s", api_health.get("error", "Unknown"))
 
         health_message += f"\n{db_emoji} Database: {db_health['status']}"
 
@@ -564,7 +568,7 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"\n   Breaking alerts tracked: {db_health.get('breaking_alert_count', '0')}"
             )
         else:
-            health_message += f"\n   Error: {db_health.get('error', 'Unknown')}"
+            logger.warning("Database health check error: %s", db_health.get("error", "Unknown"))
 
         health_message += f"\n\n📊 API Requests: {request_count}/{request_limit} today"
         health_message += "\n📊 Cache: Active (5min TTL)\n"
