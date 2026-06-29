@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 
 from telegram.constants import ParseMode
@@ -115,6 +116,74 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Sent %s breaking news alert(s).", sent_count)
 
 
+async def _send_combo(
+    context: ContextTypes.DEFAULT_TYPE,
+    grouped: dict[tuple[str, str], list[int]],
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """Fetch once per (country, category) combo and send to all subscribers in that group."""
+    for (country, category), chat_ids in grouped.items():
+        async with semaphore:
+            try:
+                data = await fetch_top_headlines(country, category)
+            except APIClientError as exc:
+                logger.error(
+                    "News API error fetching %s/%s: %s", country, category, exc
+                )
+                for chat_id in chat_ids:
+                    with contextlib.suppress(Exception):
+                        _ = await context.bot.send_message(
+                            chat_id=chat_id,
+                            text="⚠️ Could not fetch today's news. Please try again later.",
+                        )
+                continue
+            except Exception as exc:
+                logger.exception(
+                    "Unexpected error fetching %s/%s: %s", country, category, exc
+                )
+                continue
+
+            # Build a digest per user (followed topics differ per user).
+            # But reuse the fetched `data` across the whole group.
+            for chat_id in chat_ids:
+                try:
+                    followed = await get_followed_topics(chat_id)
+                    digest, empty_message = _build_digest_payload(
+                        data, category, country, followed
+                    )
+
+                    if empty_message:
+                        _ = await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=empty_message,
+                            parse_mode=ParseMode.HTML,
+                        )
+                        continue
+
+                    assert digest is not None
+                    if len(digest) <= 4096:
+                        _ = await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=digest,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
+                        await increment(DAILY_MESSAGES_SENT)
+                    else:
+                        chunks = chunk_message(digest)
+                        for chunk in chunks:
+                            _ = await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=chunk,
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True,
+                            )
+                        await increment(DAILY_MESSAGES_SENT)
+
+                except Exception as exc:
+                    logger.exception("Failed to send news to %s: %s", chat_id, exc)
+
+
 async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
     subscribers = await load_subscribers()
     if not subscribers:
@@ -123,50 +192,22 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logger.info("Sending daily news to %s subscribers...", len(subscribers))
 
+    # Group subscribers by (country, category) so we only fetch once per combo.
+    # This reduces API calls from N (one per user) to ~M (unique combos).
+    grouped: dict[tuple[str, str], list[int]] = {}
     for chat_id in subscribers:
-        try:
-            prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
-            country = prefs.get("country", DEFAULT_COUNTRY)
-            category = prefs.get("category", "general")
+        prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+        country = prefs.get("country", DEFAULT_COUNTRY)
+        category = prefs.get("category", "general")
+        grouped.setdefault((country, category), []).append(chat_id)
 
-            data = await fetch_top_headlines(country, category)
-            followed = await get_followed_topics(chat_id)
-            digest, empty_message = _build_digest_payload(data, category, country, followed)
+    logger.info(
+        "Grouped %s subscribers into %s unique (country, category) combos.",
+        len(subscribers),
+        len(grouped),
+    )
 
-            if empty_message:
-                _ = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=empty_message,
-                    parse_mode=ParseMode.HTML,
-                )
-                continue
-
-            assert digest is not None
-            if len(digest) <= 4096:
-                _ = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=digest,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-                await increment(DAILY_MESSAGES_SENT)
-            else:
-                chunks = chunk_message(digest)
-                for chunk in chunks:
-                    _ = await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=chunk,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-                await increment(DAILY_MESSAGES_SENT)
-
-        except APIClientError as exc:
-            logger.error("News API error sending daily news to %s: %s", chat_id, exc)
-            with contextlib.suppress(Exception):
-                _ = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="⚠️ Could not fetch today's news. Please try again later.",
-                )
-        except Exception as exc:
-            logger.exception("Failed to send news to %s: %s", chat_id, exc)
+    # Fetch once per combo and reuse the digest for all users in that group.
+    # Limit concurrency to avoid hammering the API.
+    semaphore = asyncio.Semaphore(3)
+    await _send_combo(context, grouped, semaphore)
