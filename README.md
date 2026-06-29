@@ -43,26 +43,27 @@ Your personalized daily news briefing, delivered straight to Telegram.
 
 ```mermaid
 graph TD
-    User([Telegram User]) <-->|Commands & Messages| Telegram[Telegram Bot API]
-    Telegram <-->|Async Handlers| Bot[bot package]
+    User(["Telegram User"]) <-->|"Commands & Messages"| Telegram["Telegram Bot API"]
+    Telegram <-->|"Async Handlers"| Bot["bot package"]
 
-    subgraph Core Application Layer
-        Bot -->|Read/Write Prefs & Subs| DB[(database.py <br> SQLite / WAL)]
-        Bot -->|Fetch Aggregated News| Fetcher[news_fetcher.py]
-        Bot -->|Format & Chunk Output| Utils[message_utils.py]
+    subgraph "Core Application Layer"
+        Bot -->|"Read/Write Prefs & Subs"| DB[("database.py — SQLite / WAL")]
+        Bot -->|"Fetch Aggregated News"| Fetcher["news_fetcher.py"]
+        Bot -->|"Format & Chunk Output"| Utils["message_utils.py"]
     end
 
-    subgraph Data Source Aggregation
-        Fetcher -->|1. Async API Request| NewsAPI[NewsData.io API]
-        Fetcher -->|2. Parallel RSS Fetch| RSS[rss_feeds.py]
+    subgraph "Data Source Aggregation"
+        Fetcher -->|"1. Async API Request"| NewsAPI["NewsData.io API"]
+        Fetcher -->|"2. Parallel RSS Fetch"| RSS["rss_feeds.py"]
     end
 
-    subgraph External Sources
-        NewsAPI -.->|HTTPS JSON| WebAPI[(NewsData Endpoints)]
-        RSS -.->|HTTPS GET & feedparser| Feeds[(External RSS Feeds)]
+    subgraph "External Sources"
+        NewsAPI -.->|"HTTPS JSON"| WebAPI[("NewsData Endpoints")]
+        RSS -.->|"HTTPS GET & feedparser"| Feeds[("External RSS Feeds")]
     end
-    subgraph Shared State (optional)
-        Bot -.->|Multi-worker cache / rate limits| State[(state.py <br> Redis or In-Memory)]
+
+    subgraph "Shared State (optional)"
+        Bot -.->|"Multi-worker cache / rate limits"| State[("state.py — Redis or In-Memory")]
     end
 
     style User fill:#eceff1,stroke:#546e7a,stroke-width:2px,color:#263238
