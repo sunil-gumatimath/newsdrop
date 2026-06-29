@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import Any, cast
 
 from telegram import BotCommand, Update
@@ -97,7 +98,7 @@ def main() -> None:
 
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
-        return
+        sys.exit(1)
 
     try:
         daily_time = _parse_daily_time(DAILY_NEWS_TIME)

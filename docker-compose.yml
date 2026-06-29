@@ -5,6 +5,7 @@ services:
     image: redis:7-alpine
     container_name: newsdrop-redis
     restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     volumes:
       - redis_data:/data
 
@@ -15,13 +16,14 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
+      - newsdrop_data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_PATH=/app/data/bot_data.db
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       - redis
 
 volumes:
   redis_data:
+  newsdrop_data:

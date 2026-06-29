@@ -1,5 +1,7 @@
 # Environment variables
 .env
+.env.*
+!.env.example
 
 # Database
 *.db
@@ -60,4 +62,4 @@ DEPLOY_GCP.md
 .terraform.lock.hcl
 
 # Local newsdrop SQLite data folder
-/data/
+/data/

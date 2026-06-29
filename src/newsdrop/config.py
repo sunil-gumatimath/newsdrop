@@ -7,6 +7,13 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if TELEGRAM_BOT_TOKEN:
+    TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN.strip()
+    if not re.match(r"^\d+:[A-Za-z0-9_-]+$", TELEGRAM_BOT_TOKEN):
+        raise ValueError(
+            "TELEGRAM_BOT_TOKEN format is invalid. Expected '<digits>:<alphanumeric>'. "
+            "Please check your .env file or environment."
+        )
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 if not NEWS_API_KEY:
