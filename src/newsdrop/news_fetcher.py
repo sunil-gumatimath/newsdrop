@@ -212,7 +212,7 @@ async def _fetch_news(params: Params) -> NewsResponse:
         )
 
     timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, max_redirects=5) as client:
         try:
             response = await client.get(NEWS_LATEST_URL, params=params)
         except httpx.TimeoutException as exc:
@@ -225,6 +225,11 @@ async def _fetch_news(params: Params) -> NewsResponse:
             ) from exc
 
         try:
+            # Enforce 2MB response size cap before parsing
+            if len(response.content) >= 2_000_000:
+                raise APIClientError(
+                    "⚠️ The news service returned an unexpectedly large response. Please try again later."
+                )
             data = response.json()
         except Exception as exc:
             raise RuntimeError(
@@ -713,10 +718,13 @@ async def check_api_health() -> dict[str, str]:
 
     try:
         timeout = httpx.Timeout(10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, max_redirects=5) as client:
             response = await client.get(NEWS_LATEST_URL, params=params)
 
             if response.status_code == 200:
+                # Enforce 2MB response size cap
+                if len(response.content) >= 2_000_000:
+                    return {"status": "unhealthy", "error": "Response too large (>=2MB)"}
                 data = response.json()
                 if isinstance(data, dict) and data.get("status") == "error":
                     results = data.get("results")

@@ -8,6 +8,7 @@ the project (so they can be merged seamlessly with NewsData.io results).
 import asyncio
 import html as html_lib
 import logging
+import os
 import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -158,12 +159,16 @@ def _entry_to_article(entry: dict, source_name: str) -> dict:
 async def _fetch_feed(client: httpx.AsyncClient, source_name: str, url: str) -> list[dict]:
     """Fetch and parse a single RSS feed. Returns [] on any failure."""
     try:
-        response = await client.get(url, timeout=8.0, follow_redirects=True)
-        if response.status_code != 200:
-            logger.warning("RSS feed %s returned HTTP %s", url, response.status_code)
-            return []
+        async with client.stream("GET", url, follow_redirects=True, max_redirects=5) as r:
+            if r.status_code != 200:
+                logger.warning("RSS feed %s returned HTTP %s", url, r.status_code)
+                return []
+            body = await r.aread(max_bytes=2_000_000)
+            if len(body) >= 2_000_000:
+                logger.warning("RSS feed %s response too large (>=2MB), aborting", url)
+                raise ValueError("Response too large")
         # feedparser is synchronous but parses bytes quickly; offload to thread.
-        parsed = await asyncio.to_thread(feedparser.parse, response.content)
+        parsed = await asyncio.to_thread(feedparser.parse, body)
         if parsed.bozo and not parsed.entries:
             logger.warning("RSS feed %s failed to parse: %s", url, parsed.get("bozo_exception"))
             return []
@@ -183,11 +188,16 @@ async def fetch_rss_articles(country: str, limit: int = 30) -> list[dict]:
     if not feeds:
         return []
 
-    # Use a shared httpx client with a reasonable UA to avoid some 403s.
+    # Use a shared httpx client with a configurable UA to avoid some 403s.
+    custom_ua = os.getenv("NEWSDROP_USER_AGENT")
+    if custom_ua:
+        ua = custom_ua
+    else:
+        ua = "Mozilla/5.0 (compatible; newsdrop-bot/1.0; +https://github.com/newsdrop)"
     headers = {
-        "User-Agent": ("Mozilla/5.0 (compatible; newsdrop-bot/1.0; +https://github.com/newsdrop)")
+        "User-Agent": ua
     }
-    async with httpx.AsyncClient(headers=headers) as client:
+    async with httpx.AsyncClient(headers=headers, max_redirects=5) as client:
         tasks = [_fetch_feed(client, name, url) for name, url in feeds]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
