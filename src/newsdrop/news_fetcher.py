@@ -486,14 +486,12 @@ def get_article_image(article: Article) -> str | None:
 
 
 async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list[Article]:
-    # P1 #3 — guard against API budget exhaustion.
-    # BREAKING_ALERT_INTERVAL_MINUTES (default 30) means the cron fires 48x/day.
-    # Without this gate, N countries × 48 cycles can blow past DAILY_REQUEST_LIMIT.
-    # We stop iterating countries the moment the daily budget is gone, so later
-    # countries share the same budget exhaustion rather than each one issuing
-    # a doomed request. The cache is per-params-key, so a cache hit short-
-    # circuits _fetch_news entirely (no budget cost) — this gate only matters
-    # on cache misses, which is exactly the over-budget case we're fixing.
+    """Fetch breaking news from the NewsData.io API, with RSS fallback.
+
+    The budget gate protects the API. RSS feeds have zero API cost, so we
+    always check them — if the API is down or the budget is exhausted,
+    RSS headlines are still scanned for keyword matches.
+    """
     breaking_articles: list[Article] = []
 
     for country in countries:
@@ -529,27 +527,37 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
                 raw_articles = data.get("articles", [])
                 articles = raw_articles if isinstance(raw_articles, list) else []
             except Exception:
-                continue
+                # API failed for this country — articles stays empty; we'll
+                # fall through to RSS below.
+                articles = []
 
         for article in articles:
             title = str(article.get("title", "")).lower()
             description = str(article.get("description", "")).lower()
             combined = f"{title} {description}"
 
-            # P1 #4 — word-boundary keyword match.
-            # Previous substring check produced noisy false positives:
-            #   "war" matched "Star Wars", "attack" matched "attack ad",
-            #   "fire" matched "laid off", "crash" matched "app crash".
-            # Word boundaries fix all of those. Trade-off: "Star Wars" still
-            # matches "war" because "Wars" is a distinct token — acceptable,
-            # those headlines are rare in /news and one FP/day beats dozens
-            # of "attack ad" hits.
             matched = [
                 kw for kw in keywords if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
             ]
-            # Require the keyword to land in the title, OR have at least two
-            # distinct keywords hit anywhere in title+description (a strong
-            # signal that the article is genuinely about a tracked topic).
+            title_hits = [kw for kw in matched if re.search(rf"\b{re.escape(kw.lower())}\b", title)]
+            if title_hits or len(matched) >= 2:
+                tagged = dict(article)
+                tagged["country"] = country
+                breaking_articles.append(tagged)
+
+        # RSS fallback: zero-cost scan of feeds for the same country.
+        # If the API returned nothing or failed entirely, RSS may still have
+        # breaking headlines. We apply the same keyword+tagging logic so
+        # RSS-only breaking articles are indistinguishable from API ones.
+        rss_articles = await _safe_fetch_rss(country, limit=20)
+        for article in rss_articles:
+            title = str(article.get("title", "")).lower()
+            description = str(article.get("description", "")).lower()
+            combined = f"{title} {description}"
+
+            matched = [
+                kw for kw in keywords if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
+            ]
             title_hits = [kw for kw in matched if re.search(rf"\b{re.escape(kw.lower())}\b", title)]
             if title_hits or len(matched) >= 2:
                 tagged = dict(article)
@@ -691,42 +699,66 @@ def extract_keywords(text: str) -> list[str]:
     return [word for word in words if len(word) > 2 and word not in common_words]
 
 
+async def _fetch_trending_for_country(
+    country: str,
+    mapped_category: str,
+    category: str,
+    keyword_counts: dict[str, int],
+) -> None:
+    """Fetch articles for a single country and update keyword_counts in-place.
+
+    Extracted so multiple countries can be fetched concurrently via gather().
+    """
+    params: Params = {
+        "apikey": NEWS_API_KEY or "",
+        "country": country,
+        "language": "en",
+        "size": 10,
+    }
+
+    if mapped_category and mapped_category != "top":
+        params["category"] = mapped_category
+
+    cache_key = _get_cache_key(params)
+    cached = await cache_get(cache_key)
+    if cached:
+        raw_articles = cached.get("articles", [])
+        articles = raw_articles if isinstance(raw_articles, list) else []
+    else:
+        try:
+            data = await _fetch_news(params)
+            raw_articles = data.get("articles", [])
+            articles = raw_articles if isinstance(raw_articles, list) else []
+        except Exception:
+            return
+
+    rss_articles = await _safe_fetch_rss(country, limit=20)
+    rss_articles = _filter_by_category(rss_articles, category)
+    articles = _merge_and_dedupe(articles, rss_articles, limit=20)
+
+    for article in articles:
+        title = str(article.get("title", "") or "")
+        for keyword in extract_keywords(title):
+            keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
+
+
 async def fetch_trending_topics(countries: list[str], category: str = "general") -> dict[str, int]:
     keyword_counts: dict[str, int] = {}
     mapped_category = CATEGORY_MAP.get(category, category)
 
+    # Fetch all countries concurrently. Limit concurrency with a semaphore to
+    # avoid hammering the API with all requests at once when many countries
+    # are configured (9 countries × up to 2 requests each = 18 API calls).
+    semaphore = asyncio.Semaphore(3)
+    tasks = []
     for country in countries:
-        params: Params = {
-            "apikey": NEWS_API_KEY or "",
-            "country": country,
-            "language": "en",
-            "size": 10,
-        }
-
-        if mapped_category and mapped_category != "top":
-            params["category"] = mapped_category
-
-        cache_key = _get_cache_key(params)
-        cached = await cache_get(cache_key)
-        if cached:
-            raw_articles = cached.get("articles", [])
-            articles = raw_articles if isinstance(raw_articles, list) else []
-        else:
-            try:
-                data = await _fetch_news(params)
-                raw_articles = data.get("articles", [])
-                articles = raw_articles if isinstance(raw_articles, list) else []
-            except Exception:
-                continue
-
-        rss_articles = await _safe_fetch_rss(country, limit=20)
-        rss_articles = _filter_by_category(rss_articles, category)
-        articles = _merge_and_dedupe(articles, rss_articles, limit=20)
-
-        for article in articles:
-            title = str(article.get("title", "") or "")
-            for keyword in extract_keywords(title):
-                keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
+        async with semaphore:
+            tasks.append(
+                asyncio.create_task(
+                    _fetch_trending_for_country(country, mapped_category, category, keyword_counts)
+                )
+            )
+    await asyncio.gather(*tasks)
 
     sorted_topics = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)
     return dict(sorted_topics[:10])

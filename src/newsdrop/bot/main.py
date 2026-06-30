@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import signal
 import sys
 import threading
@@ -40,7 +41,7 @@ from .commands import (
     unfollow_topic,
     unsubscribe,
 )
-from .health_server import start_health_server, set_ready
+from .health_server import set_ready, start_health_server
 from .helpers import (
     _parse_daily_time,
     logger,
@@ -94,6 +95,27 @@ async def error_handler(update: Update | object, context: ContextTypes.DEFAULT_T
             )
         except Exception:
             logger.exception("Failed to send error message to Telegram user")
+
+
+async def _drain_and_stop(app: Application[Any, Any, Any, Any, Any, Any]) -> None:
+    """Graceful shutdown: stop accepting new updates, drain the job queue, then exit."""
+    logger.info("Draining in-flight updates...")
+    try:
+        await app.stop()
+    except Exception:
+        logger.exception("Error while stopping the application")
+
+    logger.info("Shutting down job queue...")
+    try:
+        if app.job_queue is not None:
+            app.job_queue.scheduler.shutdown(wait=False)
+    except Exception:
+        logger.exception("Error while shutting down job queue")
+
+    try:
+        await app.shutdown()
+    except Exception:
+        logger.exception("Error during application shutdown")
 
 
 def main() -> None:
@@ -153,15 +175,18 @@ def main() -> None:
         logger.info("Breaking news alerts are disabled by configuration.")
 
     # Start HTTP health server for Docker/container orchestration.
-    health_server = start_health_server()
+    start_health_server()
 
     # Mark the application as ready so /ready returns 200.
     set_ready(True)
 
-    # Graceful shutdown: stop the job queue and polling loop on SIGTERM/SIGINT.
+    # Graceful shutdown: drain in-flight updates and stop the job queue
+    # when SIGTERM/SIGINT arrives. The signal handler flips _ready and
+    # schedules shutdown_event.set() on the main loop; after run_polling
+    # returns, we drain the application.
     shutdown_event = threading.Event()
 
-    def _shutdown(signum: int, frame: object) -> None:
+    def _shutdown(signum: int) -> None:
         sig_name = signal.Signals(signum).name
         logger.info("Received %s — initiating graceful shutdown...", sig_name)
         set_ready(False)
@@ -174,10 +199,10 @@ def main() -> None:
     logger.info("Bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-    # After polling stops (e.g. via shutdown signal), clean up.
-    logger.info("Stopping job queue...")
-    if app.job_queue is not None:
-        app.job_queue.scheduler.running = False
-
-    health_server.shutdown()
+    # After polling stops (e.g. via shutdown signal), drain + clean up.
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_drain_and_stop(app))
+    finally:
+        loop.close()
     logger.info("Bot shut down cleanly.")

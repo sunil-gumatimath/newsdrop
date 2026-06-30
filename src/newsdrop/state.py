@@ -261,6 +261,44 @@ def reset_backend() -> None:
     _backend = None
 
 
+class WindowedCounter:
+    """Sliding-window event counter for rate-based metrics.
+
+    Tracks timestamps of increments so callers can query "how many events
+    in the last N seconds" without a separate storage backend.
+
+    Used in-memory only (one process); the timestamps live in a list that
+    is trimmed on each call. For Redis-backed windowed metrics you would
+    use a sorted set — but for metrics (approximate, local-only) a list is
+    simpler and fast enough for realistic event rates (< 10k/min).
+    """
+
+    def __init__(self, name: str, windows: tuple[int, ...] = (3600, 86400)) -> None:
+        self.name = name
+        self._windows = windows
+        self._max_window = max(windows)
+        self._events: list[float] = []
+        self._lock = asyncio.Lock()
+
+    async def increment(self, value: int = 1) -> None:
+        now = asyncio.get_event_loop().time()
+        async with self._lock:
+            for _ in range(value):
+                self._events.append(now)
+            self._trim(now)
+
+    async def count_window(self, window_seconds: int) -> int:
+        now = asyncio.get_event_loop().time()
+        cutoff = now - window_seconds
+        async with self._lock:
+            self._trim(now)
+            return sum(1 for ts in self._events if ts >= cutoff)
+
+    def _trim(self, now: float) -> None:
+        cutoff = now - self._max_window
+        self._events = [ts for ts in self._events if ts >= cutoff]
+
+
 # Convenience wrappers so callers don't need to import get_backend().
 
 
