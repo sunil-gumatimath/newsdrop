@@ -466,7 +466,7 @@ def format_search_results(data: NewsResponse, query: str) -> str:
         title = str(article.get("title", "No title"))
         url = str(article.get("url", ""))
         summary = _truncate_text(
-            str(article.get("description", "") or article.get("content", "") or ""), 200
+            str(article.get("description", "") or article.get("content", "") or ""), 150
         )
 
         message += f"{_format_linked_title(i, title, url)}\n"
