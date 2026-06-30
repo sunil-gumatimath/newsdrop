@@ -112,7 +112,7 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     # window since /news fetches a full digest (higher API cost).
     if await rate_limit_check(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS):
         _ = await message.reply_text(
-            f"⏳ You're on a cooldown. Try again in {NEWS_COOLDOWN_SECONDS} second(s). "
+            f"⏳ You're on a cooldown. Try again in {NEWS_COOLDOWN_SECONDS} {NEWS_COOLDOWN_SECONDS == 1 and 'second' or 'seconds'}. "
             "Use /search for specific topics in the meantime."
         )
         return
@@ -126,27 +126,32 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         data = await fetch_top_headlines(country, category)
-        digest, empty_message = _build_digest_payload(data, category, country, followed)
+        result = _build_digest_payload(data, category, country, followed)
 
-        if empty_message:
+        if result.empty_message:
             _ = await status_msg.edit_text(
-                empty_message,
+                result.empty_message,
                 parse_mode=ParseMode.HTML,
             )
             return
 
-        assert digest is not None
-        if len(digest) <= 4096:
+        if result.digest is None:
+            return
+
+        if len(result.digest) <= 4096:
             await status_msg.edit_text(
-                digest,
+                result.digest,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
         else:
-            await status_msg.delete()
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
             await send_chunked_message(
                 message,
-                digest,
+                result.digest,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
@@ -178,7 +183,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if await rate_limit_check(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
         _ = await message.reply_text(
-            f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS} second(s) before searching again."
+            f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS} {SEARCH_COOLDOWN_SECONDS == 1 and 'second' or 'seconds'} before searching again."
         )
         return
 

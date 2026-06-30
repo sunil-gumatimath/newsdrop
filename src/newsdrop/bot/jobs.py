@@ -148,29 +148,31 @@ async def _send_combo(
             for chat_id in chat_ids:
                 try:
                     followed = await get_followed_topics(chat_id)
-                    digest, empty_message = _build_digest_payload(
+                    result = _build_digest_payload(
                         data, category, country, followed
                     )
 
-                    if empty_message:
+                    if result.empty_message:
                         _ = await context.bot.send_message(
                             chat_id=chat_id,
-                            text=empty_message,
+                            text=result.empty_message,
                             parse_mode=ParseMode.HTML,
                         )
                         continue
 
-                    assert digest is not None
-                    if len(digest) <= 4096:
+                    if result.digest is None:
+                        continue
+
+                    if len(result.digest) <= 4096:
                         _ = await context.bot.send_message(
                             chat_id=chat_id,
-                            text=digest,
+                            text=result.digest,
                             parse_mode=ParseMode.HTML,
                             disable_web_page_preview=True,
                         )
                         await increment(DAILY_MESSAGES_SENT)
                     else:
-                        chunks = chunk_message(digest)
+                        chunks = chunk_message(result.digest)
                         for chunk in chunks:
                             _ = await context.bot.send_message(
                                 chat_id=chat_id,
