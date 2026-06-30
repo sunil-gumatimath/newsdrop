@@ -4,7 +4,7 @@ import html
 import logging
 import re
 from datetime import UTC, datetime, time
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 from telegram import (
@@ -35,6 +35,12 @@ logger = logging.getLogger(__name__)
 Article = dict[str, Any]
 NewsResponse = dict[str, Any]
 Prefs = dict[str, str]
+
+
+class DigestResult(NamedTuple):
+    digest: str | None
+    empty_message: str | None
+
 
 # Per-user cooldown scopes. Backed by ``newsdrop.state`` (Redis when
 # ``REDIS_URL`` is set, in-memory otherwise). The cooldown window length is
@@ -195,16 +201,17 @@ def _build_digest_payload(
     category: str,
     country: str,
     followed_topics: list[str] | None = None,
-) -> tuple[str | None, str | None]:
+) -> DigestResult:
     """Return either a formatted HTML digest or an empty-state message.
 
-    Returns ``(digest, None)`` when articles are available and
-    ``(None, empty_message)`` otherwise. Centralizes the no-results
+    Returns ``DigestResult(digest, None)`` when articles are available and
+    ``DigestResult(None, empty_message)`` otherwise. Centralizes the no-results
     copy shared by ``/news`` and the scheduled daily job.
     """
     articles = _get_articles(data)
     if articles:
-        return _format_news_digest(articles, category, country, followed_topics), None
+        sources = data.get("sources", []) if isinstance(data, dict) else []
+        return DigestResult(_format_news_digest(articles, category, country, followed_topics, sources), None)
 
     sources_used = data.get("sources", []) if isinstance(data, dict) else []
     if sources_used:
@@ -215,7 +222,7 @@ def _build_digest_payload(
             "Try again later, or use /search &lt;topic&gt; for specific news."
         )
 
-    return None, (
+    return DigestResult(None,
         f"No {_escape_html(category)} news articles found for "
         f"{_escape_html(country.upper())} right now.\n\n{hint}"
     )
@@ -325,6 +332,7 @@ def _format_news_digest(
     category: str,
     country: str,
     followed_topics: list[str] | None = None,
+    sources: list[str] | None = None,
 ) -> str:
     """Format articles into clean HTML card digest message.
 
@@ -335,7 +343,7 @@ def _format_news_digest(
     user's followed topics appear in today's headlines.
     """
     cat_label = _category_label(category)
-    shown = articles[:10]
+    shown = articles[:20]
 
     lines: list[str] = [
         f"📰 <b>Daily News Briefing</b>  ·  {_escape_html(cat_label)} "
@@ -348,7 +356,7 @@ def _format_news_digest(
         _, source_escaped = _get_source_name(article)
         rel_time = _format_relative_time(str(article.get("publishedAt", "")))
         url = _safe_url(article.get("url", ""))
-        description = _truncate_text(article.get("description", ""), 120)
+        description = _truncate_text(article.get("description", ""), 150)
 
         # Meta parts inline with title
         meta_parts: list[str] = []
@@ -385,7 +393,7 @@ def _format_news_digest(
             pattern = re.compile(rf"\b{re.escape(q)}\b")
             for article in shown:
                 blob = f"{article.get('title', '')} {article.get('description', '')}"
-                if pattern.search(blob):
+                if pattern.search(blob) or q in blob.lower():
                     matched.append((topic, _escape_html(article.get("title", "No title"))))
                     break
 
@@ -396,7 +404,20 @@ def _format_news_digest(
                 lines.append(f"  · #{_escape_html(topic)} — {title}")
             lines.append("")
 
-    lines.append("💡 /search topic · /prefs to customize")
+    # Footer with source attribution
+    footer_parts: list[str] = []
+    if sources:
+        source_labels = []
+        for s in sources:
+            if s == "newsdata.io":
+                source_labels.append("NewsData.io")
+            elif s == "rss":
+                source_labels.append("RSS")
+            else:
+                source_labels.append(_escape_html(s))
+        footer_parts.append(f"via {' + '.join(source_labels)}")
+    footer_parts.append("/search topic · /prefs to customize")
+    lines.append("💡 " + " · ".join(footer_parts))
     return "\n".join(lines)
 
 
