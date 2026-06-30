@@ -94,8 +94,58 @@ def test_news_sends_digest_on_success(tmp_db):
         asyncio.run(commands.news(update, context))
 
     message.reply_text.assert_awaited()
-    # The status message gets edited (first call is reply_text, then edit_text on status_msg)
-    # We just verify no exception and reply happened.
+    # Verify the digest content via status_msg.edit_text
+    status_msg = message.reply_text.return_value
+    status_msg.edit_text.assert_awaited()
+    digest_text = status_msg.edit_text.call_args.args[0]
+    assert "Test Headline" in digest_text
+    assert "<b>" in digest_text
+    assert "TestSource" in digest_text
+
+
+def test_news_chunks_long_digest(tmp_db):
+    update, message, context = _make_update()
+
+    # Build enough articles with long titles and descriptions to produce a digest > 4096 chars.
+    # _format_news_digest caps at 10 articles and descriptions to 120 chars,
+    # so we need long titles and source names to push past the limit.
+    articles = []
+    for i in range(25):
+        articles.append({
+            "title": f"Breaking News Headline Number {i + 1}: Major Political Upheaval and Economic Shifts Across the Globe Today as World Leaders Gather for Emergency Summit Discussions",
+            "description": (
+                f"Article {i + 1}: This is a very long description that provides extensive detail about the political and economic events. "
+                "It contains comprehensive information about the events that are shaping the world right now and could have far-reaching "
+                "consequences for international trade, diplomacy, and domestic policy across multiple regions and countries. "
+                "Experts weigh in on the potential impacts and what this means for the future of global cooperation and stability."
+            ),
+            "url": f"https://example.com/very/long/path/to/article/number/{i + 1}/detail/page",
+            "urlToImage": "",
+            "publishedAt": "2025-01-01T00:00:00Z",
+            "source": {"name": f"InternationalNewsAgency{i + 1}GlobalReporting"},
+        })
+
+    fake_articles = {
+        "status": "ok",
+        "totalResults": len(articles),
+        "articles": articles,
+        "sources": ["newsdata.io"],
+    }
+
+    with patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch, \
+         patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False), \
+         patch("newsdrop.bot.commands.rate_limit_record", new_callable=AsyncMock), \
+         patch("newsdrop.bot.commands.get_user_prefs", new_callable=AsyncMock, return_value={"country": "us", "category": "general"}), \
+         patch("newsdrop.bot.commands.get_followed_topics", new_callable=AsyncMock, return_value=[]), \
+         patch("newsdrop.bot.commands.send_chunked_message", new_callable=AsyncMock) as mock_chunked:
+        mock_fetch.return_value = fake_articles
+        asyncio.run(commands.news(update, context))
+
+    # send_chunked_message should have been called because digest > 4096 chars
+    mock_chunked.assert_awaited()
+    # status_msg.delete should have been called before chunked send
+    status_msg = message.reply_text.return_value
+    status_msg.delete.assert_awaited()
 
 
 def test_news_blocks_on_cooldown(tmp_db):
