@@ -56,6 +56,8 @@ from .helpers import (
     SEARCH_COOLDOWN_SECONDS,
     SEARCH_RATE_LIMIT_SCOPE,
     TRENDING_CATEGORY_ALIASES,
+    TRENDING_COOLDOWN_SECONDS,
+    TRENDING_RATE_LIMIT_SCOPE,
     Prefs,
     _build_digest_payload,
     _country_name_from_code,
@@ -517,8 +519,18 @@ async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await increment(COMMAND_TOTAL)
     await increment(COMMAND_TRENDING)
 
-    raw_category = context.args[0] if context.args else ""
-    raw_country = context.args[1] if len(context.args) >= 2 else None
+    args = context.args or []
+    raw_category = args[0] if args else ""
+    raw_country = args[1] if len(args) >= 2 else None
+
+    if await rate_limit_check(TRENDING_RATE_LIMIT_SCOPE, chat_id, TRENDING_COOLDOWN_SECONDS):
+        unit = "second" if TRENDING_COOLDOWN_SECONDS == 1 else "seconds"
+        _ = await message.reply_text(
+            f"⏳ Trending is on cooldown. Try again in {TRENDING_COOLDOWN_SECONDS} {unit}."
+        )
+        return
+
+    await rate_limit_record(TRENDING_RATE_LIMIT_SCOPE, chat_id, TRENDING_COOLDOWN_SECONDS)
 
     # Resolve country: explicit override > saved DB preference > DEFAULT_COUNTRY
     prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)

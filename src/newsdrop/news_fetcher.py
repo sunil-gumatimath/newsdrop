@@ -765,6 +765,10 @@ async def fetch_trending_topics(countries: list[str], category: str = "general")
 
 
 async def check_api_health() -> dict[str, str]:
+    cached = await cache_get("health:api")
+    if isinstance(cached, dict):
+        return cached
+
     params: Params = {
         "apikey": NEWS_API_KEY or "",
         "country": "us",
@@ -780,7 +784,9 @@ async def check_api_health() -> dict[str, str]:
             if response.status_code == 200:
                 # Enforce 2MB response size cap
                 if len(response.content) >= 2_000_000:
-                    return {"status": "unhealthy", "error": "Response too large (>=2MB)"}
+                    result = {"status": "unhealthy", "error": "Response too large (>=2MB)"}
+                    await cache_set("health:api", result, 60)
+                    return result
                 data = response.json()
                 if isinstance(data, dict) and data.get("status") == "error":
                     results = data.get("results")
@@ -788,27 +794,26 @@ async def check_api_health() -> dict[str, str]:
                         err = results.get("message", "Unknown error")
                     else:
                         err = data.get("message", "Unknown error")
-                    return {
-                        "status": "unhealthy",
-                        "error": f"API error: {err}",
-                    }
+                    result = {"status": "unhealthy", "error": f"API error: {err}"}
+                    await cache_set("health:api", result, 60)
+                    return result
 
-                return {
+                result = {
                     "status": "healthy",
                     "response_time": f"{response.elapsed.total_seconds():.2f}s",
                 }
+                await cache_set("health:api", result, 60)
+                return result
 
             if response.status_code == 401:
-                return {"status": "unhealthy", "error": "Invalid API key"}
-            if response.status_code == 429:
-                return {"status": "unhealthy", "error": "Rate limit exceeded"}
-
-            return {
-                "status": "unhealthy",
-                "error": f"HTTP {response.status_code}",
-            }
+                result = {"status": "unhealthy", "error": "Invalid API key"}
+            elif response.status_code == 429:
+                result = {"status": "unhealthy", "error": "Rate limit exceeded"}
+            else:
+                result = {"status": "unhealthy", "error": f"HTTP {response.status_code}"}
+            await cache_set("health:api", result, 60)
+            return result
     except Exception as exc:
-        return {
-            "status": "unhealthy",
-            "error": str(exc),
-        }
+        result = {"status": "unhealthy", "error": str(exc)}
+        await cache_set("health:api", result, 60)
+        return result
