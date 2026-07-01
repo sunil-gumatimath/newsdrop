@@ -28,15 +28,6 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "redis>=5.0,<6",
 ]
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "pytest-asyncio>=0.21",
-    "pytest-cov>=4.0",
-    "ruff>=0.15.0",
-    "mypy>=1.10",
-]
-
 [project.scripts]
 newsdrop = "newsdrop.bot:main"
 
@@ -67,3 +58,12 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_ignores = true
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "ruff>=0.15.0",
+    "mypy>=1.10",
+]
