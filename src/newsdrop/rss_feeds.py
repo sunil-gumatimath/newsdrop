@@ -28,6 +28,9 @@ RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
         ("NDTV", "https://feeds.feedburner.com/ndtvnews-top-stories"),
         ("Indian Express", "https://indianexpress.com/section/india/feed/"),
         ("Hindustan Times", "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml"),
+        ("Deccan Herald", "https://www.deccanherald.com/stories.rss"),
+        ("The Quint", "https://www.thequint.com/feed"),
+        ("BBC News India", "https://feeds.bbci.co.uk/news/world/asia/india/rss.xml"),
     ],
     "us": [
         ("NPR", "https://feeds.npr.org/1001/rss.xml"),
@@ -43,9 +46,6 @@ RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
         ("The Guardian", "https://www.theguardian.com/uk/rss"),
         ("Sky News", "https://feeds.skynews.com/feeds/rss/uk.xml"),
     ],
-    "ca": [
-        ("CBC", "https://www.cbc.ca/webfeed/rss/rss-topstories"),
-    ],
     "au": [
         ("ABC News", "https://www.abc.net.au/news/feed/51120/rss.xml"),
     ],
@@ -57,12 +57,6 @@ RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
     ],
     "jp": [
         ("Japan Times", "https://www.japantimes.co.jp/feed/"),
-    ],
-    "br": [
-        ("G1 Globo", "https://g1.globo.com/rss/g1/"),
-    ],
-    "kr": [
-        ("Chosun English", "https://english.chosun.com/site/data/rss/rss.xml"),
     ],
 }
 

@@ -222,13 +222,13 @@ async def test_fetch_rss_articles_returns_sorted(tmp_path=None):
         ),
     }
 
-    # Use 'ca' which has only 1 RSS feed so _fetch_feed is called once
+    # Use 'au' which has only 1 RSS feed so _fetch_feed is called once
     with patch("newsdrop.rss_feeds._fetch_feed", new_callable=AsyncMock) as mock_fetch:
         mock_fetch.return_value = [
             rss_feeds._entry_to_article(e, "TestSource")
             for e in [fake_entry_old, fake_entry_new]
         ]
-        result = await rss_feeds.fetch_rss_articles("ca", limit=30)
+        result = await rss_feeds.fetch_rss_articles("au", limit=30)
 
     # Newest first
     assert len(result) == 2
