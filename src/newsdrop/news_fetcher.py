@@ -232,7 +232,8 @@ async def _fetch_news(params: Params) -> NewsResponse:
                     # Enforce 2MB response size cap before parsing
                     if len(response.content) >= 2_000_000:
                         raise APIClientError(
-                            "⚠️ The news service returned an unexpectedly large response. Please try again later."
+                            "⚠️ The news service returned an unexpectedly large response. "
+                            "Please try again later."
                         )
                     data = response.json()
                 except Exception as exc:
@@ -242,7 +243,8 @@ async def _fetch_news(params: Params) -> NewsResponse:
 
                 if not isinstance(data, dict):
                     raise RuntimeError(
-                        f"News service returned unexpected response shape (HTTP {response.status_code})"
+                        "News service returned unexpected response shape "
+                        f"(HTTP {response.status_code})"
                     )
 
                 if response.status_code != 200 or str(data.get("status", "")).lower() == "error":
@@ -265,7 +267,7 @@ async def _fetch_news(params: Params) -> NewsResponse:
             if status is not None and 400 <= status < 500 and status != 429:
                 raise
             if attempt < max_attempts - 1:
-                delay = 2 ** attempt  # 1s, 2s
+                delay = 2**attempt  # 1s, 2s
                 logger.warning(
                     "NewsData.io fetch attempt %d/%d failed (%s). Retrying in %ds...",
                     attempt + 1,
