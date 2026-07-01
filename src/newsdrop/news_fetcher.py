@@ -386,7 +386,7 @@ async def fetch_top_headlines(
 
     if isinstance(rss_result, Exception):
         logger.warning("RSS fetch failed for %s: %s", country, rss_result)
-    else:
+    elif isinstance(rss_result, list):
         rss_articles = rss_result
 
     rss_articles = _filter_by_category(rss_articles, category)

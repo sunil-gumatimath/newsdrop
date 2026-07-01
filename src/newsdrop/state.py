@@ -104,7 +104,7 @@ class _MemoryBackend(StateBackend):
         async with self._lock:
             # Evict oldest 20% when cache exceeds 10,000 keys.
             if len(self._cache) >= 10_000 and key not in self._cache:
-                sorted_keys = sorted(self._cache, k=lambda k: self._cache[k][0])
+                sorted_keys = sorted(self._cache, key=lambda k: self._cache[k][0])
                 evict_count = max(1, len(sorted_keys) // 5)
                 for old_key in sorted_keys[:evict_count]:
                     del self._cache[old_key]

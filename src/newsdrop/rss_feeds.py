@@ -153,14 +153,16 @@ def _entry_to_article(entry: dict, source_name: str) -> dict:
 async def _fetch_feed(client: httpx.AsyncClient, source_name: str, url: str) -> list[dict]:
     """Fetch and parse a single RSS feed. Returns [] on any failure."""
     try:
-        async with client.stream("GET", url, follow_redirects=True, max_redirects=5) as r:
+        async with client.stream("GET", url, follow_redirects=True) as r:
             if r.status_code != 200:
                 logger.warning("RSS feed %s returned HTTP %s", url, r.status_code)
                 return []
-            body = await r.aread(max_bytes=2_000_000)
-            if len(body) >= 2_000_000:
-                logger.warning("RSS feed %s response too large (>=2MB), aborting", url)
-                raise ValueError("Response too large")
+            body = b""
+            async for chunk in r.aiter_bytes():
+                body += chunk
+                if len(body) >= 2_000_000:
+                    logger.warning("RSS feed %s response too large (>=2MB), aborting", url)
+                    raise ValueError("Response too large")
         # feedparser is synchronous but parses bytes quickly; offload to thread.
         parsed = await asyncio.to_thread(feedparser.parse, body)
         if parsed.bozo and not parsed.entries:
