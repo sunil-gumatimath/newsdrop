@@ -131,7 +131,8 @@ def test_word_boundary_keyword_matcher_rejects_substring_FPs():
             },
             300,
         )
-        return await fetch_breaking_news(["us"], ["war"])
+        with patch("newsdrop.news_fetcher._safe_fetch_rss", return_value=[]):
+            return await fetch_breaking_news(["us"], ["war"])
 
     matched = asyncio.run(_run_false_positive())
     assert matched == [], (
@@ -152,7 +153,8 @@ def test_word_boundary_keyword_matcher_rejects_substring_FPs():
             },
             300,
         )
-        return await fetch_breaking_news(["us"], ["war"])
+        with patch("newsdrop.news_fetcher._safe_fetch_rss", return_value=[]):
+            return await fetch_breaking_news(["us"], ["war"])
 
     matched = asyncio.run(_run_true_positive())
     assert len(matched) == 1, f"expected 'war' to match 'war declared', got {matched!r}"

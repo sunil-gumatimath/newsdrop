@@ -43,8 +43,8 @@ class TestHealthServer:
         health_server.set_ready(False)
         server = health_server.start_health_server(port=18082)
         try:
-            import urllib.request
             import urllib.error
+            import urllib.request
 
             with pytest.raises(urllib.error.HTTPError) as exc_info:
                 urllib.request.urlopen("http://localhost:18082/ready", timeout=3)
@@ -55,8 +55,8 @@ class TestHealthServer:
     def test_unknown_endpoint_returns_404(self):
         server = health_server.start_health_server(port=18083)
         try:
-            import urllib.request
             import urllib.error
+            import urllib.request
 
             with pytest.raises(urllib.error.HTTPError) as exc_info:
                 urllib.request.urlopen("http://localhost:18083/unknown", timeout=3)
@@ -76,32 +76,43 @@ class TestRetryLogic:
 
     def test_retry_on_500_error(self):
         """A 500 error should be retried 3 times before failing."""
-        from unittest.mock import AsyncMock, patch, MagicMock
+        from unittest.mock import AsyncMock, patch
 
-        from newsdrop.news_fetcher import _fetch_news, APIClientError
+        from newsdrop.news_fetcher import APIClientError, _fetch_news
 
         call_count = 0
 
         class _FailingAsyncClient:
             """Async context manager that always raises APIClientError(500)."""
+
             async def __aenter__(self):
                 return self
 
-            async def __aexit__(self, *args):
+            async def __aexit__(self, _exc_type, _exc, _tb):
                 return False
 
-            async def get(self, *args, **kwargs):
+            async def get(self, *_args, **_kwargs):
                 nonlocal call_count
                 call_count += 1
                 raise APIClientError("Server error", status_code=500)
 
         async def _run():
-            with patch("newsdrop.news_fetcher.httpx.AsyncClient", return_value=_FailingAsyncClient()), \
-                 patch("newsdrop.news_fetcher.api_budget_check", new_callable=AsyncMock, return_value=True), \
-                 patch("newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None), \
-                 patch("asyncio.sleep", new_callable=AsyncMock):
-                with pytest.raises(APIClientError):
-                    await _fetch_news({"apikey": "x", "country": "us"})
+            with (
+                patch(
+                    "newsdrop.news_fetcher.httpx.AsyncClient", return_value=_FailingAsyncClient()
+                ),
+                patch(
+                    "newsdrop.news_fetcher.api_budget_check",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ),
+                patch(
+                    "newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None
+                ),
+                patch("asyncio.sleep", new_callable=AsyncMock),
+                pytest.raises(APIClientError),
+            ):
+                await _fetch_news({"apikey": "x", "country": "us"})
 
         asyncio.run(_run())
         assert call_count == 3, f"Expected 3 retry attempts, got {call_count}"
@@ -110,7 +121,7 @@ class TestRetryLogic:
         """A 401 (auth) error should NOT be retried — fail immediately."""
         from unittest.mock import AsyncMock, patch
 
-        from newsdrop.news_fetcher import _fetch_news, APIClientError
+        from newsdrop.news_fetcher import APIClientError, _fetch_news
 
         call_count = 0
 
@@ -118,42 +129,54 @@ class TestRetryLogic:
             async def __aenter__(self):
                 return self
 
-            async def __aexit__(self, *args):
+            async def __aexit__(self, _exc_type, _exc, _tb):
                 return False
 
-            async def get(self, *args, **kwargs):
+            async def get(self, *_args, **_kwargs):
                 nonlocal call_count
                 call_count += 1
                 raise APIClientError("Invalid key", status_code=401)
 
         async def _run():
-            with patch("newsdrop.news_fetcher.httpx.AsyncClient", return_value=_UnauthorizedAsyncClient()), \
-                 patch("newsdrop.news_fetcher.api_budget_check", new_callable=AsyncMock, return_value=True), \
-                 patch("newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None), \
-                 patch("asyncio.sleep", new_callable=AsyncMock):
-                with pytest.raises(APIClientError):
-                    await _fetch_news({"apikey": "x", "country": "us"})
+            with (
+                patch(
+                    "newsdrop.news_fetcher.httpx.AsyncClient",
+                    return_value=_UnauthorizedAsyncClient(),
+                ),
+                patch(
+                    "newsdrop.news_fetcher.api_budget_check",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ),
+                patch(
+                    "newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None
+                ),
+                patch("asyncio.sleep", new_callable=AsyncMock),
+                pytest.raises(APIClientError),
+            ):
+                await _fetch_news({"apikey": "x", "country": "us"})
 
         asyncio.run(_run())
         assert call_count == 1, f"Expected 1 attempt (no retry for 401), got {call_count}"
 
     def test_retry_succeeds_on_second_attempt(self):
         """If the first attempt fails with 500 but the second succeeds, return result."""
-        from unittest.mock import AsyncMock, patch, MagicMock
+        from unittest.mock import AsyncMock, MagicMock, patch
 
-        from newsdrop.news_fetcher import _fetch_news, APIClientError
+        from newsdrop.news_fetcher import APIClientError, _fetch_news
 
         call_count = 0
 
         class _FlakyAsyncClient:
             """Fails on first call, succeeds on second."""
+
             async def __aenter__(self):
                 return self
 
-            async def __aexit__(self, *args):
+            async def __aexit__(self, _exc_type, _exc, _tb):
                 return False
 
-            async def get(self, *args, **kwargs):
+            async def get(self, *_args, **_kwargs):
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:
@@ -166,11 +189,19 @@ class TestRetryLogic:
                 return mock_response
 
         async def _run():
-            with patch("newsdrop.news_fetcher.httpx.AsyncClient", return_value=_FlakyAsyncClient()), \
-                 patch("newsdrop.news_fetcher.api_budget_check", new_callable=AsyncMock, return_value=True), \
-                 patch("newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None), \
-                 patch("newsdrop.news_fetcher.api_request_consume", new_callable=AsyncMock), \
-                 patch("asyncio.sleep", new_callable=AsyncMock):
+            with (
+                patch("newsdrop.news_fetcher.httpx.AsyncClient", return_value=_FlakyAsyncClient()),
+                patch(
+                    "newsdrop.news_fetcher.api_budget_check",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ),
+                patch(
+                    "newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None
+                ),
+                patch("newsdrop.news_fetcher.api_request_consume", new_callable=AsyncMock),
+                patch("asyncio.sleep", new_callable=AsyncMock),
+            ):
                 result = await _fetch_news({"apikey": "x", "country": "us"})
                 assert result is not None
 

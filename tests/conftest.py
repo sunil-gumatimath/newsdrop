@@ -16,8 +16,9 @@ _SRC_PATH_STR = str(_SRC_PATH)
 if _SRC_PATH_STR not in sys.path:
     sys.path.insert(0, _SRC_PATH_STR)
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from newsdrop import database as _database_mod
 from newsdrop import state as _state_mod

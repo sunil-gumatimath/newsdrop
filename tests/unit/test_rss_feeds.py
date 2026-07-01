@@ -7,13 +7,11 @@ async ``fetch_rss_articles`` flow.
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from newsdrop import rss_feeds
-
 
 # ── _strip_html ─────────────────────────────────────────────────────────
 
@@ -45,7 +43,10 @@ class TestStripHtml:
         assert result == "Hello world"
 
     def test_handles_real_rss_summary(self):
-        html = '<p>Scientists discover <a href="...">new species</a> in the <b>Amazon rainforest</b>.</p>'
+        html = (
+            "<p>Scientists discover <a href=\"...\">new species</a> in the "
+            "<b>Amazon rainforest</b>.</p>"
+        )
         result = rss_feeds._strip_html(html)
         assert "<" not in result
         assert "new species" in result
@@ -59,11 +60,8 @@ class TestParseRssDate:
     def test_published_parsed_struct_time(self):
         """feedparser exposes published_parsed as a time.struct_time."""
         import time
-        from datetime import UTC
 
-        entry = {
-            "published_parsed": time.struct_time((2025, 3, 15, 12, 0, 0, 0, 0, 0))
-        }
+        entry = {"published_parsed": time.struct_time((2025, 3, 15, 12, 0, 0, 0, 0, 0))}
         result = rss_feeds._parse_rss_date(entry)
         assert "2025-03-15" in result
         assert "12:00" in result
@@ -72,9 +70,7 @@ class TestParseRssDate:
         """If published_parsed is missing, falls back to updated_parsed."""
         import time
 
-        entry = {
-            "updated_parsed": time.struct_time((2025, 6, 1, 8, 30, 0, 0, 0, 0))
-        }
+        entry = {"updated_parsed": time.struct_time((2025, 6, 1, 8, 30, 0, 0, 0, 0))}
         result = rss_feeds._parse_rss_date(entry)
         assert "2025-06-01" in result
 
@@ -98,29 +94,21 @@ class TestParseRssDate:
 
 class TestExtractImage:
     def test_media_content_url(self):
-        entry = {
-            "media_content": [{"url": "https://cdn.example.com/image.jpg"}]
-        }
+        entry = {"media_content": [{"url": "https://cdn.example.com/image.jpg"}]}
         assert rss_feeds._extract_image(entry) == "https://cdn.example.com/image.jpg"
 
     def test_media_thumbnail_url(self):
-        entry = {
-            "media_thumbnail": [{"url": "https://cdn.example.com/thumb.jpg"}]
-        }
+        entry = {"media_thumbnail": [{"url": "https://cdn.example.com/thumb.jpg"}]}
         assert rss_feeds._extract_image(entry) == "https://cdn.example.com/thumb.jpg"
 
     def test_enclosure_image(self):
         entry = {
-            "enclosures": [
-                {"type": "image/jpeg", "href": "https://cdn.example.com/photo.jpg"}
-            ]
+            "enclosures": [{"type": "image/jpeg", "href": "https://cdn.example.com/photo.jpg"}]
         }
         assert rss_feeds._extract_image(entry) == "https://cdn.example.com/photo.jpg"
 
     def test_img_tag_in_summary(self):
-        entry = {
-            "summary": '<p>Read more</p><img src="https://cdn.example.com/img.png" />'
-        }
+        entry = {"summary": '<p>Read more</p><img src="https://cdn.example.com/img.png" />'}
         assert rss_feeds._extract_image(entry) == "https://cdn.example.com/img.png"
 
     def test_returns_empty_when_no_image(self):
@@ -153,9 +141,7 @@ class TestEntryToArticle:
             "title": "Test Headline",
             "link": "https://example.com/article",
             "summary": "<p>A <b>great</b> article.</p>",
-            "published_parsed": __import__("time").struct_time(
-                (2025, 1, 15, 10, 0, 0, 0, 0, 0)
-            ),
+            "published_parsed": __import__("time").struct_time((2025, 1, 15, 10, 0, 0, 0, 0, 0)),
         }
         result = rss_feeds._entry_to_article(entry, "TestSource")
 
@@ -209,24 +195,19 @@ async def test_fetch_rss_articles_returns_sorted(tmp_path=None):
         "title": "New Article",
         "link": "https://example.com/new",
         "summary": "Newest article",
-        "published_parsed": __import__("time").struct_time(
-            (2025, 6, 1, 12, 0, 0, 0, 0, 0)
-        ),
+        "published_parsed": __import__("time").struct_time((2025, 6, 1, 12, 0, 0, 0, 0, 0)),
     }
     fake_entry_old = {
         "title": "Old Article",
         "link": "https://example.com/old",
         "summary": "Older article",
-        "published_parsed": __import__("time").struct_time(
-            (2025, 1, 1, 12, 0, 0, 0, 0, 0)
-        ),
+        "published_parsed": __import__("time").struct_time((2025, 1, 1, 12, 0, 0, 0, 0, 0)),
     }
 
     # Use 'au' which has only 1 RSS feed so _fetch_feed is called once
     with patch("newsdrop.rss_feeds._fetch_feed", new_callable=AsyncMock) as mock_fetch:
         mock_fetch.return_value = [
-            rss_feeds._entry_to_article(e, "TestSource")
-            for e in [fake_entry_old, fake_entry_new]
+            rss_feeds._entry_to_article(e, "TestSource") for e in [fake_entry_old, fake_entry_new]
         ]
         result = await rss_feeds.fetch_rss_articles("au", limit=30)
 
@@ -267,9 +248,7 @@ async def test_fetch_rss_articles_handles_fetch_errors(tmp_path=None):
         "title": "Good Article",
         "link": "https://example.com/good",
         "summary": "Works fine",
-        "published_parsed": __import__("time").struct_time(
-            (2025, 6, 1, 12, 0, 0, 0, 0, 0)
-        ),
+        "published_parsed": __import__("time").struct_time((2025, 6, 1, 12, 0, 0, 0, 0, 0)),
     }
 
     with patch("newsdrop.rss_feeds._fetch_feed", new_callable=AsyncMock) as mock_fetch:

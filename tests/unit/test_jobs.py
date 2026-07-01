@@ -7,14 +7,11 @@ provides a fresh SQLite database for each test.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from newsdrop.bot import jobs
-from newsdrop.metrics import BREAKING_ALERTS_SENT, DAILY_MESSAGES_SENT
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -84,11 +81,13 @@ async def test_send_daily_news_groups_by_country_category(tmp_db):
         "articles": _make_articles(2),
     }
 
-    with patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs, \
-         patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]), \
-         patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock):
+    with (
+        patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load,
+        patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
+        patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]),
+        patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
+        patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
+    ):
         mock_load.return_value = subscribers
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.return_value = fake_articles
@@ -135,11 +134,13 @@ async def test_send_daily_news_chunks_long_digest(tmp_db):
     async def fake_get_prefs(chat_id, default_country="us"):
         return {"country": "us", "category": "general"}
 
-    with patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs, \
-         patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]), \
-         patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock):
+    with (
+        patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load,
+        patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
+        patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]),
+        patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
+        patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
+    ):
         mock_load.return_value = {100}
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.return_value = fake_articles
@@ -160,9 +161,11 @@ async def test_send_daily_news_handles_api_error(tmp_db):
     async def fake_get_prefs(chat_id, default_country="us"):
         return {"country": "us", "category": "general"}
 
-    with patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs, \
-         patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch:
+    with (
+        patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load,
+        patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
+        patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
+    ):
         mock_load.return_value = {100, 101}
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.side_effect = APIClientError("API down", status_code=500)
@@ -191,10 +194,12 @@ async def test_send_daily_news_empty_results_sends_no_articles_message(tmp_db):
     async def fake_get_prefs(chat_id, default_country="us"):
         return {"country": "us", "category": "general"}
 
-    with patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs, \
-         patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]), \
-         patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch:
+    with (
+        patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load,
+        patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
+        patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]),
+        patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
+    ):
         mock_load.return_value = {100}
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.return_value = empty_articles
@@ -215,7 +220,9 @@ async def test_send_breaking_news_no_subscribers(tmp_db):
     """When no users opted into breaking alerts, the job exits early."""
     context = _make_context()
 
-    with patch("newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock) as mock_load:
+    with patch(
+        "newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock
+    ) as mock_load:
         mock_load.return_value = set()
         await jobs.send_breaking_news_alerts(context)
 
@@ -227,8 +234,12 @@ async def test_send_breaking_news_disabled_when_no_keywords(tmp_db):
     """If BREAKING_ALERT_KEYWORDS is empty, the job exits without sending."""
     context = _make_context()
 
-    with patch("newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.BREAKING_ALERT_KEYWORDS", []):
+    with (
+        patch(
+            "newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock
+        ) as mock_load,
+        patch("newsdrop.bot.jobs.BREAKING_ALERT_KEYWORDS", []),
+    ):
         mock_load.return_value = {100}
         await jobs.send_breaking_news_alerts(context)
 
@@ -245,13 +256,21 @@ async def test_send_breaking_news_sends_alerts(tmp_db):
     async def fake_get_prefs(chat_id, default_country="us"):
         return {"country": "us", "category": "general"}
 
-    with patch("newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs, \
-         patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=False), \
-         patch("newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock, return_value=True), \
-         patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock), \
-         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock):
+    with (
+        patch(
+            "newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock
+        ) as mock_load,
+        patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
+        patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch,
+        patch(
+            "newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=False
+        ),
+        patch(
+            "newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock, return_value=True
+        ),
+        patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock),
+        patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
+    ):
         mock_load.return_value = {100, 101}
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.return_value = articles
@@ -272,13 +291,19 @@ async def test_send_breaking_news_skips_already_sent(tmp_db):
     async def fake_get_prefs(chat_id, default_country="us"):
         return {"country": "us", "category": "general"}
 
-    with patch("newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs, \
-         patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=True), \
-         patch("newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock) as mock_mark, \
-         patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock), \
-         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock):
+    with (
+        patch(
+            "newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock
+        ) as mock_load,
+        patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
+        patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch,
+        patch(
+            "newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=True
+        ),
+        patch("newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock) as mock_mark,
+        patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock),
+        patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
+    ):
         mock_load.return_value = {100}
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.return_value = articles
@@ -300,10 +325,14 @@ async def test_send_breaking_news_handles_api_error(tmp_db):
     async def fake_get_prefs(chat_id, default_country="us"):
         return {"country": "us", "category": "general"}
 
-    with patch("newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs, \
-         patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock):
+    with (
+        patch(
+            "newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock
+        ) as mock_load,
+        patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
+        patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch,
+        patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock),
+    ):
         mock_load.return_value = {100}
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.side_effect = APIClientError("timeout", status_code=504)
@@ -335,13 +364,21 @@ async def test_send_breaking_news_groups_by_country(tmp_db):
             return {"country": "us", "category": "general"}
         return {"country": "gb", "category": "general"}
 
-    with patch("newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock) as mock_load, \
-         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs, \
-         patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=False), \
-         patch("newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock, return_value=True), \
-         patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock), \
-         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock):
+    with (
+        patch(
+            "newsdrop.bot.jobs.load_breaking_news_subscribers", new_callable=AsyncMock
+        ) as mock_load,
+        patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
+        patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch,
+        patch(
+            "newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=False
+        ),
+        patch(
+            "newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock, return_value=True
+        ),
+        patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock),
+        patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
+    ):
         mock_load.return_value = {100, 200}  # 100 → us, 200 → gb
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.return_value = us_articles

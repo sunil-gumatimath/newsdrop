@@ -10,11 +10,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from newsdrop import bot
 from newsdrop.bot import commands
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -85,11 +81,17 @@ def test_news_sends_digest_on_success(tmp_db):
         "sources": ["newsdata.io"],
     }
 
-    with patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False), \
-         patch("newsdrop.bot.commands.rate_limit_record", new_callable=AsyncMock), \
-         patch("newsdrop.bot.commands.get_user_prefs", new_callable=AsyncMock, return_value={"country": "us", "category": "general"}), \
-         patch("newsdrop.bot.commands.get_followed_topics", new_callable=AsyncMock, return_value=[]):
+    with (
+        patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
+        patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False),
+        patch("newsdrop.bot.commands.rate_limit_record", new_callable=AsyncMock),
+        patch(
+            "newsdrop.bot.commands.get_user_prefs",
+            new_callable=AsyncMock,
+            return_value={"country": "us", "category": "general"},
+        ),
+        patch("newsdrop.bot.commands.get_followed_topics", new_callable=AsyncMock, return_value=[]),
+    ):
         mock_fetch.return_value = fake_articles
         asyncio.run(commands.news(update, context))
 
@@ -111,19 +113,29 @@ def test_news_chunks_long_digest(tmp_db):
     # so we need long titles and source names to push past the limit.
     articles = []
     for i in range(25):
-        articles.append({
-            "title": f"Breaking News Headline Number {i + 1}: Major Political Upheaval and Economic Shifts Across the Globe Today as World Leaders Gather for Emergency Summit Discussions",
-            "description": (
-                f"Article {i + 1}: This is a very long description that provides extensive detail about the political and economic events. "
-                "It contains comprehensive information about the events that are shaping the world right now and could have far-reaching "
-                "consequences for international trade, diplomacy, and domestic policy across multiple regions and countries. "
-                "Experts weigh in on the potential impacts and what this means for the future of global cooperation and stability."
-            ),
-            "url": f"https://example.com/very/long/path/to/article/number/{i + 1}/detail/page",
-            "urlToImage": "",
-            "publishedAt": "2025-01-01T00:00:00Z",
-            "source": {"name": f"InternationalNewsAgency{i + 1}GlobalReporting"},
-        })
+        articles.append(
+            {
+                "title": (
+                    f"Breaking News Headline Number {i + 1}: Major Political Upheaval "
+                    f"and Economic Shifts Across the Globe Today as World Leaders "
+                    f"Gather for Emergency Summit Discussions"
+                ),
+                "description": (
+                    f"Article {i + 1}: This is a very long description that provides "
+                    "extensive detail about the political and economic events. It "
+                    "contains comprehensive information about the events that are "
+                    "shaping the world right now and could have far-reaching "
+                    "consequences for international trade, diplomacy, and domestic "
+                    "policy across multiple regions and countries. Experts weigh in "
+                    "on the potential impacts and what this means for the future of "
+                    "global cooperation and stability."
+                ),
+                "url": f"https://example.com/very/long/path/to/article/number/{i + 1}/detail/page",
+                "urlToImage": "",
+                "publishedAt": "2025-01-01T00:00:00Z",
+                "source": {"name": f"InternationalNewsAgency{i + 1}GlobalReporting"},
+            }
+        )
 
     fake_articles = {
         "status": "ok",
@@ -132,12 +144,18 @@ def test_news_chunks_long_digest(tmp_db):
         "sources": ["newsdata.io"],
     }
 
-    with patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False), \
-         patch("newsdrop.bot.commands.rate_limit_record", new_callable=AsyncMock), \
-         patch("newsdrop.bot.commands.get_user_prefs", new_callable=AsyncMock, return_value={"country": "us", "category": "general"}), \
-         patch("newsdrop.bot.commands.get_followed_topics", new_callable=AsyncMock, return_value=[]), \
-         patch("newsdrop.bot.commands.send_chunked_message", new_callable=AsyncMock) as mock_chunked:
+    with (
+        patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
+        patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False),
+        patch("newsdrop.bot.commands.rate_limit_record", new_callable=AsyncMock),
+        patch(
+            "newsdrop.bot.commands.get_user_prefs",
+            new_callable=AsyncMock,
+            return_value={"country": "us", "category": "general"},
+        ),
+        patch("newsdrop.bot.commands.get_followed_topics", new_callable=AsyncMock, return_value=[]),
+        patch("newsdrop.bot.commands.send_chunked_message", new_callable=AsyncMock) as mock_chunked,
+    ):
         mock_fetch.return_value = fake_articles
         asyncio.run(commands.news(update, context))
 
@@ -163,10 +181,16 @@ def test_news_handles_api_error(tmp_db):
 
     from newsdrop.news_fetcher import APIClientError
 
-    with patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch, \
-         patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False), \
-         patch("newsdrop.bot.commands.get_user_prefs", new_callable=AsyncMock, return_value={"country": "us", "category": "general"}), \
-         patch("newsdrop.bot.commands.get_followed_topics", new_callable=AsyncMock, return_value=[]):
+    with (
+        patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
+        patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False),
+        patch(
+            "newsdrop.bot.commands.get_user_prefs",
+            new_callable=AsyncMock,
+            return_value={"country": "us", "category": "general"},
+        ),
+        patch("newsdrop.bot.commands.get_followed_topics", new_callable=AsyncMock, return_value=[]),
+    ):
         mock_fetch.side_effect = APIClientError("API down", status_code=500)
         asyncio.run(commands.news(update, context))
 
@@ -174,8 +198,9 @@ def test_news_handles_api_error(tmp_db):
     # status_msg is the return value of the initial reply_text call
     status_msg = message.reply_text.return_value
     edit_calls = status_msg.edit_text.call_args_list
-    assert any("try again" in str(c).lower() or "could not" in str(c).lower() for c in edit_calls), \
-        f"Expected error message in edit_text calls, got: {edit_calls}"
+    assert any(
+        "try again" in str(c).lower() or "could not" in str(c).lower() for c in edit_calls
+    ), f"Expected error message in edit_text calls, got: {edit_calls}"
 
 
 # ── /search ──────────────────────────────────────────────────────────────
@@ -280,9 +305,23 @@ def test_subscribe_and_unsubscribe(tmp_db):
 def test_prefs_shows_user_settings(tmp_db):
     update, message, context = _make_update()
 
-    with patch("newsdrop.bot.commands.get_user_prefs", new_callable=AsyncMock, return_value={"country": "in", "category": "technology"}), \
-         patch("newsdrop.bot.commands.get_followed_topics", new_callable=AsyncMock, return_value=["AI", "crypto"]), \
-         patch("newsdrop.bot.commands.get_breaking_news_preference", new_callable=AsyncMock, return_value=True):
+    with (
+        patch(
+            "newsdrop.bot.commands.get_user_prefs",
+            new_callable=AsyncMock,
+            return_value={"country": "in", "category": "technology"},
+        ),
+        patch(
+            "newsdrop.bot.commands.get_followed_topics",
+            new_callable=AsyncMock,
+            return_value=["AI", "crypto"],
+        ),
+        patch(
+            "newsdrop.bot.commands.get_breaking_news_preference",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
         asyncio.run(commands.preferences(update, context))
 
     text = message.reply_text.call_args.args[0]
@@ -311,11 +350,30 @@ def test_help_lists_commands():
 def test_health_returns_status():
     update, message, context = _make_update()
 
-    with patch("newsdrop.bot.commands.check_api_health", new_callable=AsyncMock, return_value={"status": "healthy", "response_time": "0.5s"}), \
-         patch("newsdrop.bot.commands.check_db_health", new_callable=AsyncMock, return_value={"status": "healthy", "subscriber_count": "5", "followed_topic_count": "3", "breaking_alert_count": "10"}), \
-         patch("newsdrop.bot.commands.get_request_count", new_callable=AsyncMock, return_value=(42, 200)), \
-         patch("newsdrop.bot.commands.all_metrics", new_callable=AsyncMock, return_value={}), \
-         patch("newsdrop.bot.commands.increment", new_callable=AsyncMock):
+    with (
+        patch(
+            "newsdrop.bot.commands.check_api_health",
+            new_callable=AsyncMock,
+            return_value={"status": "healthy", "response_time": "0.5s"},
+        ),
+        patch(
+            "newsdrop.bot.commands.check_db_health",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "healthy",
+                "subscriber_count": "5",
+                "followed_topic_count": "3",
+                "breaking_alert_count": "10",
+            },
+        ),
+        patch(
+            "newsdrop.bot.commands.get_request_count",
+            new_callable=AsyncMock,
+            return_value=(42, 200),
+        ),
+        patch("newsdrop.bot.commands.all_metrics", new_callable=AsyncMock, return_value={}),
+        patch("newsdrop.bot.commands.increment", new_callable=AsyncMock),
+    ):
         asyncio.run(commands.health(update, context))
 
     text = message.reply_text.call_args.args[0]
@@ -329,8 +387,14 @@ def test_health_returns_status():
 def test_trending_with_valid_category(tmp_db):
     update, message, context = _make_update(args=["tech"])
 
-    with patch("newsdrop.bot.commands.get_user_prefs", new_callable=AsyncMock, return_value={"country": "us", "category": "general"}), \
-         patch("newsdrop.bot.commands._send_trending_results", new_callable=AsyncMock) as mock_send:
+    with (
+        patch(
+            "newsdrop.bot.commands.get_user_prefs",
+            new_callable=AsyncMock,
+            return_value={"country": "us", "category": "general"},
+        ),
+        patch("newsdrop.bot.commands._send_trending_results", new_callable=AsyncMock) as mock_send,
+    ):
         asyncio.run(commands.trending(update, context))
     mock_send.assert_awaited()
 
@@ -363,7 +427,11 @@ def test_clear_asks_confirmation(tmp_db):
 def test_breaking_shows_toggle(tmp_db):
     update, message, context = _make_update()
 
-    with patch("newsdrop.bot.commands.get_breaking_news_preference", new_callable=AsyncMock, return_value=False):
+    with patch(
+        "newsdrop.bot.commands.get_breaking_news_preference",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
         asyncio.run(commands.breaking_toggle(update, context))
 
     text = message.reply_text.call_args.args[0]
