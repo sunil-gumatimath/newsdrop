@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
@@ -113,8 +115,9 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     # Per-user cooldown — same pattern as /search, but with a longer
     # window since /news fetches a full digest (higher API cost).
     if await rate_limit_check(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS):
+        unit = "second" if NEWS_COOLDOWN_SECONDS == 1 else "seconds"
         _ = await message.reply_text(
-            f"⏳ You're on a cooldown. Try again in {NEWS_COOLDOWN_SECONDS} {NEWS_COOLDOWN_SECONDS == 1 and 'second' or 'seconds'}. "
+            f"⏳ You're on a cooldown. Try again in {NEWS_COOLDOWN_SECONDS} {unit}. "
             "Use /search for specific topics in the meantime."
         )
         return
@@ -147,10 +150,8 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
                 disable_web_page_preview=True,
             )
         else:
-            try:
+            with contextlib.suppress(Exception):
                 await status_msg.delete()
-            except Exception:
-                pass
             await send_chunked_message(
                 message,
                 result.digest,
@@ -161,7 +162,7 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         # Record the successful call for cooldown tracking.
         await rate_limit_record(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS)
 
-    except APIClientError as exc:
+    except APIClientError:
         await increment(NEWS_API_ERRORS)
         logger.exception("Failed to fetch news")
         _ = await status_msg.edit_text("🔧 Could not fetch news. Please try again later.")
@@ -184,8 +185,9 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if await rate_limit_check(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
+        unit = "second" if SEARCH_COOLDOWN_SECONDS == 1 else "seconds"
         _ = await message.reply_text(
-            f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS} {SEARCH_COOLDOWN_SECONDS == 1 and 'second' or 'seconds'} before searching again."
+            f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS} {unit} before searching again."
         )
         return
 
@@ -214,7 +216,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             disable_web_page_preview=True,
         )
         await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
-    except APIClientError as exc:
+    except APIClientError:
         await increment(NEWS_API_ERRORS)
         logger.exception("Failed to search news")
         _ = await status_msg.edit_text("🔧 Could not fetch news. Please try again later.")

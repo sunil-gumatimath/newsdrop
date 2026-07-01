@@ -86,8 +86,8 @@ def _parse_rss_date(entry: dict) -> str:
         t = entry.get(key)
         if t:
             try:
-                dt = datetime(*t[:6], tzinfo=UTC)
-                return dt.isoformat()
+                dt = datetime(*t[:6], tzinfo=UTC)  # type: ignore[misc]
+                return str(dt.isoformat())
             except Exception:
                 pass
 
@@ -95,10 +95,10 @@ def _parse_rss_date(entry: dict) -> str:
     raw = entry.get("published") or entry.get("updated") or ""
     if raw:
         try:
-            dt = parsedate_to_datetime(raw)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            return dt.isoformat()
+            dt_raw: datetime = parsedate_to_datetime(raw)
+            if dt_raw.tzinfo is None:
+                dt_raw = dt_raw.replace(tzinfo=UTC)
+            return str(dt_raw.isoformat())
         except Exception:
             pass
     return ""
@@ -111,17 +111,17 @@ def _extract_image(entry: dict) -> str:
     if media and isinstance(media, list):
         url = media[0].get("url")
         if url:
-            return url
+            return str(url)
     # <media:thumbnail url="..."/>
     thumbs = entry.get("media_thumbnail") or []
     if thumbs and isinstance(thumbs, list):
         url = thumbs[0].get("url")
         if url:
-            return url
+            return str(url)
     # <enclosure type="image/...">
     for enc in entry.get("enclosures", []) or []:
         if enc.get("type", "").startswith("image/") and enc.get("href"):
-            return enc["href"]
+            return str(enc["href"])
     # image in summary/content
     summary = entry.get("summary") or ""
     match = re.search(r'<img[^>]+src="([^"]+)"', summary)
@@ -186,13 +186,8 @@ async def fetch_rss_articles(country: str, limit: int = 30) -> list[dict]:
 
     # Use a shared httpx client with a configurable UA to avoid some 403s.
     custom_ua = os.getenv("NEWSDROP_USER_AGENT")
-    if custom_ua:
-        ua = custom_ua
-    else:
-        ua = "Mozilla/5.0 (compatible; newsdrop-bot/1.0; +https://github.com/newsdrop)"
-    headers = {
-        "User-Agent": ua
-    }
+    ua = custom_ua or "Mozilla/5.0 (compatible; newsdrop-bot/1.0; +https://github.com/newsdrop)"
+    headers = {"User-Agent": ua}
     async with httpx.AsyncClient(headers=headers, max_redirects=5) as client:
         tasks = [_fetch_feed(client, name, url) for name, url in feeds]
         results = await asyncio.gather(*tasks, return_exceptions=True)

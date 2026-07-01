@@ -4,6 +4,7 @@ Counters are stored in the shared state backend so they work across
 workers when Redis is configured. Also exposes windowed counters
 (1-hour and 24-hour sliding windows) for rate-based alerting.
 """
+
 from __future__ import annotations
 
 from .state import WindowedCounter

@@ -136,8 +136,7 @@ class _MemoryBackend(StateBackend):
                 loop = asyncio.get_running_loop()
                 now = loop.time()
                 expired = [
-                    k for k, ts in self._rate_limits.items()
-                    if (now - ts) >= cooldown_seconds
+                    k for k, ts in self._rate_limits.items() if (now - ts) >= cooldown_seconds
                 ]
                 for k in expired:
                     del self._rate_limits[k]

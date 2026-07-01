@@ -19,7 +19,11 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 
 from ..config import (
     COUNTRIES,
+)
+from ..config import (
     NEWS_COOLDOWN_SECONDS as _NEWS_COOLDOWN_SECONDS,
+)
+from ..config import (
     SEARCH_COOLDOWN_SECONDS as _SEARCH_COOLDOWN_SECONDS,
 )
 from ..database import (
@@ -214,7 +218,9 @@ def _build_digest_payload(
     articles = _get_articles(data)
     if articles:
         sources = data.get("sources", []) if isinstance(data, dict) else []
-        return DigestResult(_format_news_digest(articles, category, country, followed_topics, sources), None)
+        return DigestResult(
+            _format_news_digest(articles, category, country, followed_topics, sources), None
+        )
 
     sources_used = data.get("sources", []) if isinstance(data, dict) else []
     if sources_used:
@@ -225,9 +231,10 @@ def _build_digest_payload(
             "Try again later, or use /search &lt;topic&gt; for specific news."
         )
 
-    return DigestResult(None,
+    return DigestResult(
+        None,
         f"No {_escape_html(category)} news articles found for "
-        f"{_escape_html(country.upper())} right now.\n\n{hint}"
+        f"{_escape_html(country.upper())} right now.\n\n{hint}",
     )
 
 
@@ -305,8 +312,12 @@ async def _build_trending_topic_rows(
                 prefix_bytes = prefix.encode("utf-8")
                 topic_bytes = safe_topic.encode("utf-8")
                 overflow = len(prefix_bytes) - 64
-                safe_topic = topic_bytes[:len(topic_bytes) - overflow - 1].decode("utf-8", errors="ignore")
-                follow_action = "unfollow" if await is_following_topic(chat_id, safe_topic) else "follow"
+                safe_topic = topic_bytes[: len(topic_bytes) - overflow - 1].decode(
+                    "utf-8", errors="ignore"
+                )
+                follow_action = (
+                    "unfollow" if await is_following_topic(chat_id, safe_topic) else "follow"
+                )
                 follow_label = "➖ Unfollow" if follow_action == "unfollow" else "➕ Follow"
                 break
 

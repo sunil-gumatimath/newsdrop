@@ -4,6 +4,7 @@ import asyncio
 import signal
 import sys
 import threading
+from types import FrameType
 from typing import Any, cast
 
 from telegram import BotCommand, Update
@@ -186,7 +187,7 @@ def main() -> None:
     # returns, we drain the application.
     shutdown_event = threading.Event()
 
-    def _shutdown(signum: int) -> None:
+    def _shutdown(signum: int, _frame: FrameType | None) -> None:
         sig_name = signal.Signals(signum).name
         logger.info("Received %s — initiating graceful shutdown...", sig_name)
         set_ready(False)

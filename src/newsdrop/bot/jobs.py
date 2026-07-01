@@ -127,9 +127,7 @@ async def _send_combo(
             try:
                 data = await fetch_top_headlines(country, category)
             except APIClientError as exc:
-                logger.error(
-                    "News API error fetching %s/%s: %s", country, category, exc
-                )
+                logger.error("News API error fetching %s/%s: %s", country, category, exc)
                 for chat_id in chat_ids:
                     with contextlib.suppress(Exception):
                         _ = await context.bot.send_message(
@@ -138,9 +136,7 @@ async def _send_combo(
                         )
                 continue
             except Exception as exc:
-                logger.exception(
-                    "Unexpected error fetching %s/%s: %s", country, category, exc
-                )
+                logger.exception("Unexpected error fetching %s/%s: %s", country, category, exc)
                 continue
 
             # Build a digest per user (followed topics differ per user).
@@ -148,9 +144,7 @@ async def _send_combo(
             for chat_id in chat_ids:
                 try:
                     followed = await get_followed_topics(chat_id)
-                    result = _build_digest_payload(
-                        data, category, country, followed
-                    )
+                    result = _build_digest_payload(data, category, country, followed)
 
                     if result.empty_message:
                         _ = await context.bot.send_message(

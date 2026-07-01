@@ -101,7 +101,9 @@ async def _handle_search_callback(
 
     prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     country = prefs.get("country", DEFAULT_COUNTRY)
-    status_msg = await query.message.reply_text(f'🔍 Searching for "{topic}"...')
+    status_msg = await query.message.reply_text(  # type: ignore[attr-defined]
+        f'🔍 Searching for "{topic}"...'
+    )
 
     try:
         data_search = await search_news(topic, country)
@@ -114,7 +116,7 @@ async def _handle_search_callback(
             disable_web_page_preview=True,
         )
         await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
-    except APIClientError as exc:
+    except APIClientError:
         logger.exception("Callback search failed")
         _ = await status_msg.edit_text("🔧 Could not fetch news. Please try again later.")
     except Exception as exc:
@@ -127,12 +129,12 @@ async def _handle_follow_callback(query: CallbackQuery, chat_id: int, value: str
     created, result = await add_followed_topic(chat_id, topic)
     if query.message:
         if created:
-            _ = await query.message.reply_text(
+            _ = await query.message.reply_text(  # type: ignore[attr-defined]
                 f"✅ Now following <b>{_escape_html(result)}</b>.",
                 parse_mode=ParseMode.HTML,
             )
         else:
-            _ = await query.message.reply_text(f"⚠️ {result}")
+            _ = await query.message.reply_text(f"⚠️ {result}")  # type: ignore[attr-defined]
 
 
 async def _handle_unfollow_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
@@ -140,12 +142,14 @@ async def _handle_unfollow_callback(query: CallbackQuery, chat_id: int, value: s
     removed = await remove_followed_topic(chat_id, topic)
     if query.message:
         if removed:
-            _ = await query.message.reply_text(
+            _ = await query.message.reply_text(  # type: ignore[attr-defined]
                 f"✅ Unfollowed <b>{_escape_html(topic)}</b>.",
                 parse_mode=ParseMode.HTML,
             )
         else:
-            _ = await query.message.reply_text("⚠️ You are not following that topic.")
+            _ = await query.message.reply_text(  # type: ignore[attr-defined]
+                "⚠️ You are not following that topic."
+            )
 
 
 async def _handle_confirm_or_cancel(

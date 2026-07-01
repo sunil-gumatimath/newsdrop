@@ -57,12 +57,8 @@ class _HealthHandler(BaseHTTPRequestHandler):
                     "command_total",
                 ]
                 for rk in rate_keys:
-                    rates[f"{rk}_1h"] = loop.run_until_complete(
-                        get_rate(rk, 3600)
-                    )
-                    rates[f"{rk}_24h"] = loop.run_until_complete(
-                        get_rate(rk, 86400)
-                    )
+                    rates[f"{rk}_1h"] = loop.run_until_complete(get_rate(rk, 3600))
+                    rates[f"{rk}_24h"] = loop.run_until_complete(get_rate(rk, 86400))
             finally:
                 loop.close()
             self._respond(
