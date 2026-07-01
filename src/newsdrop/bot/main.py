@@ -7,6 +7,7 @@ import threading
 from types import FrameType
 from typing import Any, cast
 
+from apscheduler.schedulers import SchedulerNotRunningError
 from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
@@ -110,6 +111,8 @@ async def _drain_and_stop(app: Application[Any, Any, Any, Any, Any, Any]) -> Non
     try:
         if app.job_queue is not None:
             app.job_queue.scheduler.shutdown(wait=False)
+    except SchedulerNotRunningError:
+        logger.debug("Scheduler was already stopped — nothing to shut down.")
     except Exception:
         logger.exception("Error while shutting down job queue")
 
