@@ -100,14 +100,13 @@ async def error_handler(update: Update | object, context: ContextTypes.DEFAULT_T
 
 
 async def _drain_and_stop(app: Application[Any, Any, Any, Any, Any, Any]) -> None:
-    """Graceful shutdown: stop accepting new updates, drain the job queue, then exit."""
-    logger.info("Draining in-flight updates...")
-    try:
-        await app.stop()
-    except Exception:
-        logger.exception("Error while stopping the application")
+    """Graceful shutdown: drain in-flight updates and stop the job queue.
 
-    logger.info("Shutting down job queue...")
+    ``run_polling`` already calls ``app.stop()`` and ``app.shutdown()``
+    internally when the shutdown event fires, so we only need to tear
+    down the job-queue scheduler here.
+    """
+    logger.debug("Draining in-flight updates...")
     try:
         if app.job_queue is not None:
             app.job_queue.scheduler.shutdown(wait=False)
@@ -115,11 +114,6 @@ async def _drain_and_stop(app: Application[Any, Any, Any, Any, Any, Any]) -> Non
         logger.debug("Scheduler was already stopped — nothing to shut down.")
     except Exception:
         logger.exception("Error while shutting down job queue")
-
-    try:
-        await app.shutdown()
-    except Exception:
-        logger.exception("Error during application shutdown")
 
 
 def main() -> None:
