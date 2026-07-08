@@ -19,6 +19,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 
 from ..config import (
     ADMIN_CHAT_IDS,
+    CATEGORIES,
     COUNTRIES,
 )
 from ..config import (
@@ -45,6 +46,7 @@ Prefs = dict[str, str]
 class DigestResult(NamedTuple):
     digest: str | None
     empty_message: str | None
+    reply_markup: InlineKeyboardMarkup | None = None
 
 
 # Per-user cooldown scopes. Backed by ``newsdrop.state`` (Redis when
@@ -90,7 +92,69 @@ def _truncate_text(value: object, max_length: int) -> str:
     text = "" if value is None else str(value)
     if len(text) <= max_length:
         return text
-    return text[: max_length - 3].rstrip() + "..."
+    # Prefer cutting on a word boundary so Telegram blurbs don't look broken.
+    cut = text[: max_length - 3].rstrip()
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return cut + "..."
+
+
+def _clean_blurb_text(value: object) -> str:
+    """Strip HTML/boilerplate from API/RSS description or content fields."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    # HTML → plain text (RSS/API sometimes ship markup).
+    text = re.sub(r"<br\s*/?>|</p>|</div>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+
+    # Common feed/API noise.
+    text = re.sub(r"\[\s*\+?\d+\s*chars?\s*\]", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[\s*\.\.\.\s*\]", "", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" \t\n\r-–—|·•")
+
+    # Drop useless stubs.
+    low = text.lower()
+    if low in {"", "null", "none", "n/a", "na", "undefined"}:
+        return ""
+    if low.startswith("click here") or low.startswith("read more"):
+        return ""
+    return text
+
+
+def _article_blurb(article: Article, max_length: int = 140) -> str:
+    """Best short description available for an article.
+
+    Prefers ``description``, then ``content``. Always returns a plain string
+    suitable for Telegram italics (caller still HTML-escapes).
+    """
+    candidates = (
+        article.get("description"),
+        article.get("content"),
+        article.get("summary"),
+    )
+    title = _clean_blurb_text(article.get("title", "")).lower()
+
+    for raw in candidates:
+        text = _clean_blurb_text(raw)
+        if not text:
+            continue
+        # Skip blurbs that are just the title repeated.
+        if title and text.lower() == title:
+            continue
+        if title and text.lower().startswith(title) and len(text) - len(title) < 12:
+            continue
+        if len(text) < 20:
+            # Too short to be useful as a description.
+            continue
+        return _truncate_text(text, max_length)
+
+    return ""
 
 
 def _safe_url(url: object) -> str:
@@ -173,6 +237,47 @@ def _category_label(category: str) -> str:
     return "Top" if category == "general" else category.capitalize()
 
 
+def _country_display(country: str) -> str:
+    """Human label for a country code, e.g. ``us`` → ``🇺🇸 US``."""
+    code = (country or "").strip().lower()
+    if not code:
+        return "—"
+    for label, value in COUNTRIES.items():
+        if value == code:
+            # Labels look like "🇺🇸 United States" — keep flag + short code.
+            flag = label.split(" ", 1)[0] if label else ""
+            if flag and not flag.isascii():
+                return f"{flag} {code.upper()}"
+            return code.upper()
+    return code.upper()
+
+
+def _format_source_line(article: Article) -> str:
+    """Build a clean meta line: time · source · also covered by …"""
+    _, source_escaped = _get_source_name(article)
+    rel_time = _format_relative_time(str(article.get("publishedAt", "")))
+
+    parts: list[str] = []
+    if rel_time:
+        parts.append(f"⏱ {rel_time}")
+    parts.append(f"📍 {source_escaped}")
+
+    related = article.get("relatedSources") or []
+    if isinstance(related, list) and related:
+        also = " · ".join(_escape_html(str(s)) for s in related[:3] if s)
+        if also:
+            parts.append(f"also {also}")
+    else:
+        try:
+            cluster_size = int(article.get("clusterSize", 1) or 1)
+        except (TypeError, ValueError):
+            cluster_size = 1
+        if cluster_size > 1:
+            parts.append(f"{cluster_size} sources")
+
+    return "  ·  ".join(parts)
+
+
 def _country_name_from_code(code: str) -> str:
     return next((name for name, value in COUNTRIES.items() if value == code), code)
 
@@ -211,6 +316,246 @@ def _get_articles(payload: dict[str, Any]) -> list[Article]:
     return articles if isinstance(articles, list) else []
 
 
+def _match_followed_topics(article: Article, followed_topics: list[str] | None) -> list[str]:
+    """Return followed topics that appear in this article (word-boundary match)."""
+    if not followed_topics:
+        return []
+    blob = f"{article.get('title', '')} {article.get('description', '')} {article.get('content', '')}"
+    hits: list[str] = []
+    for topic in followed_topics:
+        q = topic.lower().strip()
+        if not q:
+            continue
+        pattern = re.compile(rf"\b{re.escape(q)}\b", re.IGNORECASE)
+        if pattern.search(blob) or q in blob.lower():
+            hits.append(topic)
+    return hits
+
+
+def _personalize_articles(
+    articles: list[Article],
+    followed_topics: list[str] | None = None,
+) -> list[Article]:
+    """Tag why-this-story reasons and put followed matches first."""
+    from ..story_ranker import source_trust
+
+    enriched: list[Article] = []
+    for article in articles:
+        item = dict(article)
+        reasons: list[str] = []
+        matched = _match_followed_topics(item, followed_topics)
+        if matched:
+            item["matchedTopics"] = matched
+            reasons.append(f"📌 #{matched[0]}")
+        try:
+            cluster_size = int(item.get("clusterSize", 1) or 1)
+        except (TypeError, ValueError):
+            cluster_size = 1
+        related = item.get("relatedSources") or []
+        if cluster_size > 1 or (isinstance(related, list) and related):
+            reasons.append("🗞 Multi-source")
+        source_obj = item.get("source", {})
+        source_name = (
+            str(source_obj.get("name", "")) if isinstance(source_obj, dict) else str(source_obj or "")
+        )
+        if source_trust(source_name) >= 0.9:
+            reasons.append("⭐ Trusted")
+        if item.get("redditTrending") or item.get("crossConfirmed"):
+            reasons.append("🔥 Trending")
+        item["whyTags"] = reasons
+        enriched.append(item)
+
+    def _sort_key(a: Article) -> tuple[int, int, str]:
+        matched = a.get("matchedTopics") or []
+        has_follow = 1 if matched else 0
+        cluster = 0
+        try:
+            cluster = min(int(a.get("clusterSize", 1) or 1), 5)
+        except (TypeError, ValueError):
+            pass
+        return (has_follow, cluster, str(a.get("publishedAt", "") or ""))
+
+    enriched.sort(key=_sort_key, reverse=True)
+    return enriched
+
+
+def _build_digest_keyboard(
+    articles: list[Article],
+    *,
+    follow_topic: str | None = None,
+) -> InlineKeyboardMarkup | None:
+    """URL buttons for the top stories (2 per row, max 8 stories).
+
+    Optionally append a Follow row for search results.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for i, article in enumerate(articles[:8], 1):
+        url = _safe_url(article.get("url", ""))
+        if not url:
+            continue
+        raw_source, _ = _get_source_name(article)
+        short = (raw_source or "Read")[:14]
+        label = f"{i} · {short}"
+        row.append(InlineKeyboardButton(label, url=url))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    topic = _sanitize_follow_topic(follow_topic or "")
+    if topic:
+        cb = f"follow:{topic}"
+        if len(cb.encode("utf-8")) <= 64:
+            rows.append(
+                [InlineKeyboardButton(f"➕ Follow #{topic}", callback_data=cb)]
+            )
+
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def build_search_payload(data: NewsResponse, query: str) -> DigestResult:
+    """Format search results like the /news digest, with open + follow buttons."""
+    articles = _get_articles(data)
+    q = (query or "").strip()
+    if not articles:
+        empty = (
+            f'🔍 <b>No results for “{_escape_html(q)}”</b>\n\n'
+            "We only show whole-word matches (so “AI” won’t match “airport”).\n"
+            "Try another keyword, or /news for your usual briefing."
+        )
+        return DigestResult(None, empty, _empty_digest_keyboard())
+
+    shown = articles[:8]
+    divider = "─" * 18
+    lines: list[str] = [
+        f'🔍 <b>Search: “{_escape_html(q)}”</b>',
+        f"{len(shown)} result{'s' if len(shown) != 1 else ''}",
+        divider,
+        "",
+    ]
+
+    for i, article in enumerate(shown, 1):
+        title = _escape_html(article.get("title", "No title"))
+        url = _safe_url(article.get("url", ""))
+        blurb = _article_blurb(article, max_length=130)
+
+        if url:
+            escaped_url = html.escape(url, quote=True)
+            lines.append(f'<b>{i}.</b> <a href="{escaped_url}"><b>{title}</b></a>')
+        else:
+            lines.append(f"<b>{i}. {title}</b>")
+
+        if blurb:
+            lines.append(f"<i>{_escape_html(blurb)}</i>")
+        lines.append(_format_source_line(article))
+        lines.append("")
+
+    lines.append(divider)
+    total = data.get("totalResults", len(shown)) if isinstance(data, dict) else len(shown)
+    lines.append(f"💡 Showing top {len(shown)} of {total}  ·  buttons open full articles")
+    digest = "\n".join(lines)
+    return DigestResult(digest, None, _build_digest_keyboard(shown, follow_topic=q))
+
+
+def format_breaking_alert(
+    article: Article,
+    matched_keywords: list[str],
+    *,
+    used_today: int,
+    max_per_day: int,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """One compact breaking-alert message + optional open button."""
+    title = _escape_html(article.get("title", "No title"))
+    url = _safe_url(article.get("url", ""))
+    blurb = _article_blurb(article, max_length=160)
+    _, source = _get_source_name(article)
+    rel = _format_relative_time(str(article.get("publishedAt", "")))
+
+    # Prefer the strongest signal: keywords that hit the title.
+    title_l = str(article.get("title", "")).lower()
+    title_hits = [k for k in matched_keywords if re.search(rf"\b{re.escape(k.lower())}\b", title_l)]
+    shown_kw = title_hits or matched_keywords
+    kw_label = ", ".join(f"#{_escape_html(k)}" for k in shown_kw[:3])
+
+    lines = [
+        "🚨 <b>Breaking</b>",
+        f"Matched {kw_label}" if kw_label else "Matched your alert keywords",
+        "",
+    ]
+    if url:
+        escaped_url = html.escape(url, quote=True)
+        lines.append(f'<a href="{escaped_url}"><b>{title}</b></a>')
+    else:
+        lines.append(f"<b>{title}</b>")
+    if blurb:
+        lines.append(f"<i>{_escape_html(blurb)}</i>")
+
+    meta: list[str] = []
+    if rel:
+        meta.append(f"⏱ {rel}")
+    meta.append(f"📍 {source}")
+    lines.append("  ·  ".join(meta))
+
+    remaining = max(0, max_per_day - used_today)
+    lines.append("")
+    lines.append(f"🔔 Alert {used_today}/{max_per_day} today  ·  {remaining} left")
+
+    keyboard = None
+    if url:
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📖 Read full story", url=url)]]
+        )
+    return "\n".join(lines), keyboard
+
+
+def _empty_digest_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🌍 Region", callback_data="menu:country"),
+                InlineKeyboardButton("📂 Category", callback_data="menu:category"),
+            ],
+            [InlineKeyboardButton("🔍 Search instead", callback_data="menu:search_hint")],
+        ]
+    )
+
+
+def country_keyboard(onboarding: bool = False) -> InlineKeyboardMarkup:
+    prefix = "obcountry" if onboarding else "country"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(display, callback_data=f"{prefix}:{code}")]
+            for display, code in COUNTRIES.items()
+        ]
+    )
+
+
+def category_keyboard(onboarding: bool = False) -> InlineKeyboardMarkup:
+    prefix = "obcategory" if onboarding else "category"
+    # Two columns for a denser mobile layout.
+    buttons = [
+        InlineKeyboardButton(cat.capitalize(), callback_data=f"{prefix}:{cat}") for cat in CATEGORIES
+    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(buttons), 2):
+        rows.append(buttons[i : i + 2])
+    return InlineKeyboardMarkup(rows)
+
+
+def onboarding_finish_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Subscribe to daily news", callback_data="obsub:1")],
+            [
+                InlineKeyboardButton("📰 Get news now", callback_data="obnews:1"),
+                InlineKeyboardButton("Skip", callback_data="obsub:0"),
+            ],
+        ]
+    )
+
+
 def _build_digest_payload(
     data: NewsResponse,
     category: str,
@@ -219,30 +564,36 @@ def _build_digest_payload(
 ) -> DigestResult:
     """Return either a formatted HTML digest or an empty-state message.
 
-    Returns ``DigestResult(digest, None)`` when articles are available and
-    ``DigestResult(None, empty_message)`` otherwise. Centralizes the no-results
-    copy shared by ``/news`` and the scheduled daily job.
+    Returns ``DigestResult(digest, None, keyboard)`` when articles are available and
+    ``DigestResult(None, empty_message, empty_keyboard)`` otherwise. Centralizes the
+    no-results copy shared by ``/news`` and the scheduled daily job.
     """
     articles = _get_articles(data)
     if articles:
         sources = data.get("sources", []) if isinstance(data, dict) else []
-        return DigestResult(
-            _format_news_digest(articles, category, country, followed_topics, sources), None
-        )
+        personalized = _personalize_articles(articles, followed_topics)
+        shown = personalized[:10]
+        digest = _format_news_digest(shown, category, country, followed_topics, sources)
+        return DigestResult(digest, None, _build_digest_keyboard(shown))
 
     sources_used = data.get("sources", []) if isinstance(data, dict) else []
+    region = _escape_html(_country_display(country))
+    cat = _escape_html(_category_label(category))
     if sources_used:
-        hint = "Try a different region or category with /setcountry /setcategory."
+        hint = (
+            "Nothing matched this combo right now.\n"
+            "Try another <b>region</b> or <b>category</b> below, then /news again."
+        )
     else:
         hint = (
-            "The news service may be temporarily unavailable. "
-            "Try again later, or use /search &lt;topic&gt; for specific news."
+            "The news service may be temporarily unavailable.\n"
+            "Try again in a minute, or use /search &lt;topic&gt;."
         )
 
     return DigestResult(
         None,
-        f"No {_escape_html(category)} news articles found for "
-        f"{_escape_html(country.upper())} right now.\n\n{hint}",
+        f"📭 <b>No stories found</b>\n{cat}  ·  {region}\n\n{hint}",
+        _empty_digest_keyboard(),
     )
 
 
@@ -279,13 +630,13 @@ def _get_source_name(article: Article) -> tuple[str, str]:
 
 def _build_article_caption(index: int, article: Article) -> str:
     title = _escape_html(article.get("title", "No title"))
-    description = _truncate_text(article.get("description", ""), 150)
+    blurb = _article_blurb(article, max_length=150)
     _, source_escaped = _get_source_name(article)
     rel_time = _format_relative_time(str(article.get("publishedAt", "")))
 
     caption = f"<b>{index}. {title}</b>\n"
-    if description:
-        caption += f"<i>{_escape_html(description)}</i>\n"
+    if blurb:
+        caption += f"<i>{_escape_html(blurb)}</i>\n"
     if rel_time:
         caption += f"⏱ {rel_time}\n"
     caption += f"📍 {source_escaped}"
@@ -296,7 +647,6 @@ def _build_article_caption(index: int, article: Article) -> str:
             badge += f" · r/{_escape_html(subreddit)}"
         caption += f"\n{badge}"
     return caption
-
 
 def _build_read_more_keyboard(article: Article) -> InlineKeyboardMarkup | None:
     url = _safe_url(article.get("url", ""))
@@ -362,87 +712,76 @@ def _format_news_digest(
     followed_topics: list[str] | None = None,
     sources: list[str] | None = None,
 ) -> str:
-    """Format articles into clean HTML card digest message.
+    """Format articles into a clean multi-line HTML digest for Telegram.
 
-    Each article is rendered as a compact card: clickable bold title with
-    inline time/source meta on the same line, an indented description
-    below, and blank-line separators between cards.  If *followed_topics*
-    is provided, a highlight section is appended showing which of the
-    user's followed topics appear in today's headlines.
+    Layout (mobile-friendly cards)::
+
+        📰 News Briefing
+        Technology · 🇺🇸 US · 8 stories
+
+        1. Headline as a bold link
+        Short description…
+        ⏱ 2h ago  ·  📍 Reuters  ·  also BBC
+        📌 #AI · 🗞 Multi-source
+
+        2. Next headline…
+        …
     """
     cat_label = _category_label(category)
-    shown = articles[:20]
+    region = _country_display(country)
+    # Cap for readability on mobile (still enough for a solid briefing).
+    shown = articles[:10]
+    divider = "─" * 18
+    follow_count = sum(1 for a in shown if a.get("matchedTopics"))
 
     lines: list[str] = [
-        f"📰 <b>Daily News Briefing</b>  ·  {_escape_html(cat_label)} "
-        f"({_escape_html(country.upper())})  ·  {len(shown)} articles",
-        "",
+        "📰 <b>News Briefing</b>",
+        f"{_escape_html(cat_label)}  ·  {_escape_html(region)}  ·  "
+        f"{len(shown)} stor{'y' if len(shown) == 1 else 'ies'}",
     ]
+    if follow_count:
+        lines.append(f"📌 {follow_count} match your follows (shown first)")
+    lines.extend([divider, ""])
 
     for i, article in enumerate(shown, 1):
         title = _escape_html(article.get("title", "No title"))
-        _, source_escaped = _get_source_name(article)
-        rel_time = _format_relative_time(str(article.get("publishedAt", "")))
         url = _safe_url(article.get("url", ""))
-        description = _truncate_text(article.get("description", ""), 150)
+        blurb = _article_blurb(article, max_length=140)
 
-        # Meta parts inline with title
-        meta_parts: list[str] = []
-        if rel_time:
-            meta_parts.append(f"⏱{rel_time}")
-        meta_parts.append(f"📍{source_escaped}")
-        meta_str = " · ".join(meta_parts)
-
-        # Card header: number + clickable bold title + inline meta
+        # Title line — bold number + clickable headline (no meta crammed in).
         if url:
             escaped_url = html.escape(url, quote=True)
-            lines.append(f'<b>{i}.</b> <a href="{escaped_url}"><b>{title}</b></a>  ·  {meta_str}')
+            lines.append(f'<b>{i}.</b> <a href="{escaped_url}"><b>{title}</b></a>')
         else:
-            lines.append(f"<b>{i}.</b> <b>{title}</b>  ·  {meta_str}")
+            lines.append(f"<b>{i}. {title}</b>")
 
-        # Description on its own line, clean indent
-        if description:
-            lines.append(f"   {_escape_html(description)}")
+        # Always try to show a short description under the headline.
+        if blurb:
+            lines.append(f"<i>{_escape_html(blurb)}</i>")
+        else:
+            lines.append("<i>Tap the title or button below to read the full story.</i>")
 
-        if article.get("redditTrending") or article.get("crossConfirmed"):
+        lines.append(_format_source_line(article))
+
+        why = article.get("whyTags") or []
+        if isinstance(why, list) and why:
+            # Deduplicate overlapping reddit badges.
+            tags = [str(t) for t in why if t]
+            lines.append(" · ".join(tags))
+        elif article.get("redditTrending") or article.get("crossConfirmed"):
             subreddit = str(article.get("redditSubreddit", "") or "")
-            badge = "🔥 Also trending on Reddit"
+            badge = "🔥 Trending on Reddit"
             if subreddit:
                 badge += f" · r/{_escape_html(subreddit)}"
-            lines.append(f"   {badge}")
+            lines.append(badge)
 
-        lines.append("")
+        lines.append("")  # blank line between cards
 
-    # Followed-topics highlight: zero-cost filter over already-fetched
-    # articles.  Shows which of the user's interests appear in today's
-    # headlines so /follow has tangible value in the daily briefing.
-    if followed_topics:
-        matched: list[tuple[str, str]] = []
-        for topic in followed_topics:
-            q = topic.lower().strip()
-            if not q:
-                continue
-            # Word-boundary match to avoid false positives like "ai"
-            # matching "rain" or "trail".  Same pattern used by
-            # fetch_breaking_news in news_fetcher.py.
-            pattern = re.compile(rf"\b{re.escape(q)}\b")
-            for article in shown:
-                blob = f"{article.get('title', '')} {article.get('description', '')}"
-                if pattern.search(blob) or q in blob.lower():
-                    matched.append((topic, _escape_html(article.get("title", "No title"))))
-                    break
-
-        if matched:
-            lines.append("📌 <b>From your followed topics</b>")
-            lines.append("")
-            for topic, title in matched[:5]:
-                lines.append(f"  · #{_escape_html(topic)} — {title}")
-            lines.append("")
-
-    # Footer with source attribution
-    footer_parts: list[str] = []
+    # Footer
+    lines.append(divider)
+    footer_bits: list[str] = []
     if sources:
-        source_labels = []
+        source_labels: list[str] = []
         for s in sources:
             if s == "newsdata.io":
                 source_labels.append("NewsData.io")
@@ -452,9 +791,10 @@ def _format_news_digest(
                 source_labels.append("Reddit")
             else:
                 source_labels.append(_escape_html(s))
-        footer_parts.append(f"via {' + '.join(source_labels)}")
-    footer_parts.append("/search topic · /prefs to customize")
-    lines.append("💡 " + " · ".join(footer_parts))
+        if source_labels:
+            footer_bits.append(" + ".join(source_labels))
+    footer_bits.append("buttons below open full articles")
+    lines.append("💡 " + "  ·  ".join(footer_bits))
     return "\n".join(lines)
 
 
@@ -534,68 +874,64 @@ async def _send_trending_results(
 
 
 async def _clear_chat_messages(
-    bot: Bot, chat_id: int, from_id: int, window: int = 60
+    bot: Bot,
+    chat_id: int,
+    from_id: int,
+    window: int = 150,
+    *,
+    skip_ids: set[int] | None = None,
 ) -> tuple[int, int]:
-    """Walk ``range(from_id, from_id - window, -1)`` and try to delete each.
+    """Walk recent message IDs and delete everything the bot is allowed to.
 
-    The bot must have admin (delete-message) rights in the chat for this to
-    work. Telegram only lets bots delete messages that are <48h old, so most
-    failures are expected and silently skipped. The first ``Forbidden`` aborts
-    the loop and posts a user-visible explanation; a flood of other errors is
-    capped at 5 so a single cleanup can never lock the bot in a hot loop.
+    Telegram constraints:
+    - Private chats: bot can usually only delete **its own** messages (<48h).
+    - Groups: needs delete-message admin rights for others' messages.
+    - There is no ``get_chat_history`` API for bots, so we probe a contiguous
+      ID range ending at *from_id*.
 
-    Returns ``(deleted, errors)`` — the number of successful deletes and the
-    number of non-benign Telegram errors encountered. Benign ``BadRequest``
-    cases ("not found" / "can't be deleted" / "message is too old") are
-    swallowed without counting toward the error budget.
+    ``Forbidden`` on a single ID is **skipped** (often a user message in DMs),
+    not a hard stop — otherwise clear would abort on the first user message.
+
+    Returns ``(deleted, skipped_or_errors)``.
     """
     deleted = 0
-    error_count = 0
+    skipped = 0
+    hard_errors = 0
+    skip = skip_ids or set()
 
-    # python-telegram-bot 22.7 does not expose Bot.get_chat_history, so we
-    # approximate "recent messages" by trying to delete a contiguous ID range
-    # around the trigger message. Non-existent IDs and already-deleted
-    # messages are filtered out by the BadRequest handling below.
-    for msg_id in range(from_id, from_id - window, -1):
+    # Probe from the newest ID downward through the window.
+    start = max(1, from_id)
+    end = max(0, start - window)
+    for msg_id in range(start, end, -1):
+        if msg_id in skip:
+            continue
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
             deleted += 1
         except Forbidden:
-            # Bot lacks admin rights, or the user is in a DM. Stop and tell
-            # them why we can't proceed — silent partial deletes are worse
-            # than a clear error.
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        "❌ Can't delete more messages here. In groups the bot "
-                        "needs delete rights; in private chat it can only remove "
-                        "its own recent messages."
-                    ),
-                )
-            except TelegramError as send_exc:
-                logger.warning("clear_chat could not post Forbidden notice: %s", send_exc)
-            return deleted, error_count
+            # Expected for other users' messages in private chat — keep going.
+            skipped += 1
+            continue
         except BadRequest as exc:
             s = str(exc).lower()
-            if "not found" in s or "can't be deleted" in s or "message is too old" in s:
-                # Benign: already gone, never ours, or past the 48h window.
+            if (
+                "not found" in s
+                or "can't be deleted" in s
+                or "message to delete not found" in s
+                or "message can't be deleted" in s
+                or "message is too old" in s
+                or "message identifier is not specified" in s
+            ):
+                skipped += 1
                 continue
             logger.warning("clear_chat BadRequest for message %s: %s", msg_id, exc)
-            error_count += 1
-            if error_count > 5:
-                try:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text="⚠️ Stopped after 5 errors — chat may be too active.",
-                    )
-                except TelegramError as send_exc:
-                    logger.warning("clear_chat could not post stop notice: %s", send_exc)
-                return deleted, error_count
+            hard_errors += 1
+            if hard_errors > 8:
+                return deleted, skipped + hard_errors
         except TelegramError as exc:
             logger.warning("clear_chat TelegramError for message %s: %s", msg_id, exc)
-            error_count += 1
-            if error_count > 5:
-                return deleted, error_count
+            hard_errors += 1
+            if hard_errors > 8:
+                return deleted, skipped + hard_errors
 
-    return deleted, error_count
+    return deleted, skipped + hard_errors
