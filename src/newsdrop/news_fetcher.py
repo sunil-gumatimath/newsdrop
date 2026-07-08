@@ -25,11 +25,15 @@ from .config import (
     ENABLE_RSS,
     GLOBAL_COUNTRY_CODES,
     NEWS_API_KEY,
-    WORD_RE,
 )
 from .cross_verify import apply_cross_verification
 from .reddit_feeds import fetch_reddit_posts, has_reddit_for
-from .rss_feeds import fetch_rss_articles, has_rss_for
+from .rss_feeds import (
+    fetch_rss_articles,
+    fetch_rss_category_articles,
+    has_rss_category,
+    has_rss_for,
+)
 from .state import (
     api_budget_check,
     api_request_consume,
@@ -37,6 +41,7 @@ from .state import (
     cache_get,
     cache_set,
 )
+from .story_ranker import rank_and_cluster
 
 Article = dict[str, Any]
 NewsResponse = dict[str, Any]
@@ -65,6 +70,31 @@ logger = logging.getLogger(__name__)
 
 # Daily API request tracking for free-tier protection.
 _request_limit = DAILY_REQUEST_LIMIT if DAILY_REQUEST_LIMIT > 0 else 200
+
+# Shared HTTP client for NewsData.io (connection reuse across fetches).
+_http_client: httpx.AsyncClient | None = None
+_http_client_lock = asyncio.Lock()
+
+
+async def get_http_client() -> httpx.AsyncClient:
+    """Return a process-wide AsyncClient, creating it on first use."""
+    global _http_client
+    if _http_client is not None and not _http_client.is_closed:
+        return _http_client
+    async with _http_client_lock:
+        if _http_client is None or _http_client.is_closed:
+            timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
+            _http_client = httpx.AsyncClient(timeout=timeout, max_redirects=5)
+        return _http_client
+
+
+async def close_http_client() -> None:
+    """Close the shared client (tests / graceful shutdown)."""
+    global _http_client
+    async with _http_client_lock:
+        if _http_client is not None and not _http_client.is_closed:
+            await _http_client.aclose()
+        _http_client = None
 
 
 class APIClientError(Exception):
@@ -168,16 +198,38 @@ def _classify_api_error(status_code: int, body: NewsResponse) -> str:
     return "⚠️ An unexpected error occurred while fetching news. Please try again later."
 
 
+def _clean_article_text(value: object) -> str:
+    """Normalize description/content from NewsData into plain readable text."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    text = re.sub(r"<br\s*/?>|</p>|</div>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    # NewsData often appends "[+123 chars]" truncation markers.
+    text = re.sub(r"\[\s*\+?\d+\s*chars?\s*\]", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _normalize_article(article: Article) -> Article:
     source_name = article.get("source_name") or article.get("source_id") or "Unknown"
     category = article.get("category", [])
     country = article.get("country", [])
 
+    description = _clean_article_text(article.get("description"))
+    content = _clean_article_text(article.get("content"))
+    # Prefer a filled description; fall back to content snippet for digests.
+    if not description and content:
+        description = content[:500]
+
     return {
         "source": {"name": source_name},
         "title": article.get("title") or "No title",
-        "description": article.get("description") or "",
-        "content": article.get("content") or "",
+        "description": description,
+        "content": content,
         "url": article.get("link") or "",
         "urlToImage": article.get("image_url") or "",
         "publishedAt": article.get("pubDate") or "",
@@ -217,51 +269,52 @@ async def _fetch_news(params: Params) -> NewsResponse:
 
     max_attempts = 3
     last_exc: Exception | None = None
+    client = await get_http_client()
     for attempt in range(max_attempts):
         try:
-            timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
-            async with httpx.AsyncClient(timeout=timeout, max_redirects=5) as client:
-                try:
-                    response = await client.get(NEWS_LATEST_URL, params=params)
-                except httpx.TimeoutException as exc:
-                    raise APIClientError(
-                        "⏳ The news service took too long to respond. Please try again."
-                    ) from exc
-                except httpx.HTTPError as exc:
-                    raise APIClientError(
-                        "🔌 Unable to reach the news service right now. Please try again later."
-                    ) from exc
+            try:
+                response = await client.get(NEWS_LATEST_URL, params=params)
+            except httpx.TimeoutException as exc:
+                raise APIClientError(
+                    "⏳ The news service took too long to respond. Please try again."
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise APIClientError(
+                    "🔌 Unable to reach the news service right now. Please try again later."
+                ) from exc
 
-                try:
-                    # Enforce 2MB response size cap before parsing
-                    if len(response.content) >= 2_000_000:
-                        raise APIClientError(
-                            "⚠️ The news service returned an unexpectedly large response. "
-                            "Please try again later."
-                        )
-                    data = response.json()
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"News service returned invalid response (HTTP {response.status_code})"
-                    ) from exc
-
-                if not isinstance(data, dict):
-                    raise RuntimeError(
-                        "News service returned unexpected response shape "
-                        f"(HTTP {response.status_code})"
+            try:
+                # Enforce 2MB response size cap before parsing
+                if len(response.content) >= 2_000_000:
+                    raise APIClientError(
+                        "⚠️ The news service returned an unexpectedly large response. "
+                        "Please try again later."
                     )
+                data = response.json()
+            except APIClientError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"News service returned invalid response (HTTP {response.status_code})"
+                ) from exc
 
-                if response.status_code != 200 or str(data.get("status", "")).lower() == "error":
-                    raise APIClientError(
-                        _classify_api_error(response.status_code, data),
-                        status_code=response.status_code,
-                        api_code=str(data.get("code", "")) or None,
-                    )
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    "News service returned unexpected response shape "
+                    f"(HTTP {response.status_code})"
+                )
 
-                normalized = _normalize_response(data)
-                await cache_set(cache_key, normalized, CACHE_TTL_SECONDS)
-                await api_request_consume(_request_limit)
-                return normalized
+            if response.status_code != 200 or str(data.get("status", "")).lower() == "error":
+                raise APIClientError(
+                    _classify_api_error(response.status_code, data),
+                    status_code=response.status_code,
+                    api_code=str(data.get("code", "")) or None,
+                )
+
+            normalized = _normalize_response(data)
+            await cache_set(cache_key, normalized, CACHE_TTL_SECONDS)
+            await api_request_consume(_request_limit)
+            return normalized
 
         except (APIClientError, RuntimeError) as exc:
             last_exc = exc
@@ -284,36 +337,14 @@ async def _fetch_news(params: Params) -> NewsResponse:
     raise last_exc  # type: ignore[misc]
 
 
-def _normalize_title(title: str) -> str:
-    if not title:
-        return ""
-    return " ".join(WORD_RE.findall(title.lower()))
-
-
 def _merge_and_dedupe(*sources: list[Article], limit: int = 10) -> list[Article]:
-    seen_urls: set[str] = set()
-    seen_titles: set[str] = set()
-    merged: list[Article] = []
+    """Merge sources, cluster near-duplicates, and rank by quality signals.
 
-    for source in sources:
-        for article in source:
-            url = str(article.get("url", "")).strip()
-            title_key = _normalize_title(str(article.get("title", "")))
-
-            if url and url in seen_urls:
-                continue
-            if title_key and title_key in seen_titles:
-                continue
-
-            if url:
-                seen_urls.add(url)
-            if title_key:
-                seen_titles.add(title_key)
-
-            merged.append(article)
-
-    merged.sort(key=lambda a: str(a.get("publishedAt", "") or ""), reverse=True)
-    return merged[:limit]
+    Kept as the public merge entrypoint used by tests and call sites. Ranking
+    prefers trusted outlets, multi-source corroboration, and freshness over
+    pure recency.
+    """
+    return rank_and_cluster(*sources, limit=limit)
 
 
 async def _safe_fetch_reddit(country: str, category: str, limit_per_sub: int = 25) -> list[Article]:
@@ -326,27 +357,118 @@ async def _safe_fetch_reddit(country: str, category: str, limit_per_sub: int = 2
         return []
 
 
-async def _safe_fetch_rss(country: str, limit: int = 20) -> list[Article]:
-    if not ENABLE_RSS or not has_rss_for(country):
+async def _safe_fetch_rss(
+    country: str,
+    limit: int = 20,
+    category: str = "general",
+) -> list[Article]:
+    """Fetch RSS for country (+ category feeds when available).
+
+    Category-specific feeds are returned as-is (already on-topic). Country
+    general feeds are keyword-filtered only when the requested category is
+    not general and we had to fall back to them.
+    """
+    if not ENABLE_RSS or not has_rss_for(country, category):
         return []
     try:
-        return await fetch_rss_articles(country, limit=limit)
+        cat = (category or "general").strip().lower()
+        if cat and cat != "general" and has_rss_category(cat):
+            category_articles, country_articles = await asyncio.gather(
+                fetch_rss_category_articles(cat, limit=limit),
+                fetch_rss_articles(country, limit=limit, category="general"),
+            )
+            # Country general feeds need keyword filter; category feeds do not.
+            country_articles = _filter_by_category(country_articles, cat)
+            return category_articles + country_articles
+
+        articles = await fetch_rss_articles(country, limit=limit, category=cat)
+        if cat and cat != "general":
+            articles = _filter_by_category(articles, cat)
+        return articles
     except Exception as exc:
-        logger.warning("RSS fetch failed for %s: %s", country, exc)
+        logger.warning("RSS fetch failed for %s/%s: %s", country, category, exc)
         return []
+
+def _query_terms(query: str) -> list[str]:
+    """Tokenize a search query into matchable terms."""
+    raw = (query or "").strip().lower()
+    if not raw:
+        return []
+    # Keep short acronyms (ai, ml, uk) and longer words; drop tiny noise.
+    terms = re.findall(r"[a-z0-9]{2,}", raw)
+    return terms
+
+
+def _term_pattern(term: str) -> re.Pattern[str]:
+    """Whole-word / whole-token pattern.
+
+    For 2-letter terms like ``ai``, require a real word boundary so we do
+    **not** match inside ``against``, ``airport``, ``complaint``, ``said``.
+    """
+    escaped = re.escape(term.lower())
+    # Word boundary: letters/digits on either side block the match.
+    return re.compile(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", re.IGNORECASE)
+
+
+def _article_text_fields(article: Article) -> tuple[str, str]:
+    title = str(article.get("title", "") or "")
+    body = f"{article.get('description', '') or ''} {article.get('content', '') or ''}"
+    return title, body
+
+
+def _query_relevance(article: Article, query: str) -> float:
+    """Score how well an article matches the query (0 = no match).
+
+    Title hits beat body hits. Multi-term queries need every term somewhere
+    (AND), but score higher when more terms land in the title.
+    """
+    terms = _query_terms(query)
+    if not terms:
+        return 0.0
+
+    title, body = _article_text_fields(article)
+    title_l = title.lower()
+    body_l = body.lower()
+    blob_l = f"{title_l} {body_l}"
+
+    score = 0.0
+    for term in terms:
+        pat = _term_pattern(term)
+        in_title = bool(pat.search(title_l))
+        in_body = bool(pat.search(body_l))
+        if not in_title and not in_body:
+            # Phrase fallback only for multi-word original query on full blob.
+            return 0.0
+        if in_title:
+            # Short acronyms in title are strong signals (AI, ML, ...).
+            score += 4.0 if len(term) <= 3 else 3.0
+        elif in_body:
+            score += 1.0
+
+    # Exact phrase bonus (e.g. "artificial intelligence").
+    phrase = (query or "").strip().lower()
+    if len(phrase) >= 4 and phrase in blob_l:
+        score += 2.0
+        if phrase in title_l:
+            score += 3.0
+
+    return score
 
 
 def _filter_by_query(articles: list[Article], query: str) -> list[Article]:
-    q = query.lower().strip()
-    if not q:
+    """Keep articles that match the query with whole-word semantics."""
+    if not (query or "").strip():
         return articles
-
-    result: list[Article] = []
+    ranked: list[tuple[float, Article]] = []
     for article in articles:
-        blob = f"{article.get('title', '')} {article.get('description', '')}"
-        if q in blob.lower():
-            result.append(article)
-    return result
+        score = _query_relevance(article, query)
+        if score > 0:
+            ranked.append((score, article))
+    ranked.sort(
+        key=lambda item: (item[0], str(item[1].get("publishedAt", "") or "")),
+        reverse=True,
+    )
+    return [article for _, article in ranked]
 
 
 def _filter_by_category(articles: list[Article], category: str) -> list[Article]:
@@ -396,7 +518,7 @@ async def fetch_top_headlines(
 
     api_result, rss_result, reddit_result = await asyncio.gather(
         _fetch_news(params),
-        _safe_fetch_rss(country, limit=20),
+        _safe_fetch_rss(country, limit=20, category=category),
         _safe_fetch_reddit(country, category),
         return_exceptions=True,
     )
@@ -422,16 +544,18 @@ async def fetch_top_headlines(
     elif isinstance(reddit_result, list):
         reddit_posts = reddit_result
 
-    rss_articles = _filter_by_category(rss_articles, category)
     api_articles = (api_data or {}).get("articles", [])
     api_articles = api_articles if isinstance(api_articles, list) else []
 
     if not api_articles and not rss_articles and api_error is not None:
         raise api_error
 
+    # Cluster + rank first; Reddit popularity re-orders within the ranked set.
     merged = _merge_and_dedupe(api_articles, rss_articles, limit=10)
     if reddit_posts:
         merged = apply_cross_verification(merged, reddit_posts)
+        # Re-rank so multi-source + Reddit signals both influence order.
+        merged = rank_and_cluster(merged, limit=10)
 
     sources_used: list[str] = []
     if api_articles:
@@ -450,9 +574,10 @@ async def fetch_top_headlines(
 
 
 async def search_news(query: str, country: str = "us") -> NewsResponse:
+    q = (query or "").strip()
     params: Params = {
         "apikey": NEWS_API_KEY or "",
-        "q": query,
+        "q": q,
         "language": "en",
         "size": 10,
     }
@@ -466,34 +591,44 @@ async def search_news(query: str, country: str = "us") -> NewsResponse:
         api_error = exc
         logger.warning("NewsData.io search failed, will try RSS: %s", exc)
 
-    rss_articles = await _safe_fetch_rss(country, limit=50)
-    rss_articles = _filter_by_query(rss_articles, query)
+    # RSS: pull a wider pool, then strict whole-word filter (fixes "AI" → airport).
+    rss_articles = await _safe_fetch_rss(country, limit=50, category="general")
+    rss_articles = _filter_by_query(rss_articles, q)
 
     api_articles = (api_data or {}).get("articles", [])
     api_articles = api_articles if isinstance(api_articles, list) else []
+    # API can still return loose matches for short queries — enforce relevance.
+    api_articles = _filter_by_query(api_articles, q)
 
     if not api_articles and not rss_articles and api_error is not None:
         raise api_error
 
-    merged = _merge_and_dedupe(api_articles, rss_articles, limit=10)
+    # Prefer API hits (already query-targeted), then RSS; re-score by relevance.
+    merged = _merge_and_dedupe(api_articles, rss_articles, limit=20)
+    merged = _filter_by_query(merged, q)[:10]
 
     return {
         "status": "ok",
         "totalResults": len(merged),
         "articles": merged,
+        "query": q,
     }
 
 
 def format_search_results(data: NewsResponse, query: str) -> str:
+    """Legacy text formatter (tests / fallback). Prefer ``build_search_payload``."""
     raw_articles = data.get("articles", [])
     articles: list[Article] = raw_articles if isinstance(raw_articles, list) else []
 
     if not articles:
-        return f'No results found for "{_escape_text(query)}". Try a different search term.'
+        return (
+            f'🔍 No results found for "{_escape_text(query)}". '
+            "Try a different search term."
+        )
 
-    message = f'🔍 <b>Search Results: "{_escape_text(query)}"</b>\n\n'
+    message = f'🔍 <b>Search: "{_escape_text(query)}"</b>\n\n'
 
-    for i, article in enumerate(articles[:10], 1):
+    for i, article in enumerate(articles[:8], 1):
         source_obj = article.get("source", {})
         source = (
             _escape_text(source_obj.get("name", "Unknown"))
@@ -502,16 +637,20 @@ def format_search_results(data: NewsResponse, query: str) -> str:
         )
         title = str(article.get("title", "No title"))
         url = str(article.get("url", ""))
-        summary = _truncate_text(
-            str(article.get("description", "") or article.get("content", "") or ""), 150
-        )
+        raw_summary = str(
+            article.get("description", "") or article.get("content", "") or ""
+        ).strip()
+        raw_summary = re.sub(r"\[\s*\+?\d+\s*chars?\s*\]", "", raw_summary, flags=re.IGNORECASE)
+        raw_summary = re.sub(r"\s+", " ", raw_summary).strip()
+        summary = _truncate_text(raw_summary, 140)
 
         message += f"{_format_linked_title(i, title, url)}\n"
-        message += f"<i>{_escape_text(summary)}</i>\n"
+        if summary:
+            message += f"<i>{_escape_text(summary)}</i>\n"
         message += f"📍 {source}\n\n"
 
     total_results = data.get("totalResults", 0)
-    message += f"Found {total_results} results. Showing top 10."
+    message += f"Found {total_results} results. Showing top {min(8, len(articles))}."
     return message
 
 
@@ -588,7 +727,7 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
         # If the API returned nothing or failed entirely, RSS may still have
         # breaking headlines. We apply the same keyword+tagging logic so
         # RSS-only breaking articles are indistinguishable from API ones.
-        rss_articles = await _safe_fetch_rss(country, limit=20)
+        rss_articles = await _safe_fetch_rss(country, limit=20, category="general")
         for article in rss_articles:
             title = str(article.get("title", "")).lower()
             description = str(article.get("description", "")).lower()
@@ -776,8 +915,7 @@ async def _fetch_trending_for_country(
             except Exception:
                 return
 
-        rss_articles = await _safe_fetch_rss(country, limit=20)
-        rss_articles = _filter_by_category(rss_articles, category)
+        rss_articles = await _safe_fetch_rss(country, limit=20, category=category)
         articles = _merge_and_dedupe(articles, rss_articles, limit=20)
 
         for article in articles:
@@ -823,42 +961,46 @@ async def check_api_health() -> dict[str, str]:
     }
 
     try:
-        timeout = httpx.Timeout(10.0)
-        async with httpx.AsyncClient(timeout=timeout, max_redirects=5) as client:
-            response = await client.get(NEWS_LATEST_URL, params=params)
+        client = await get_http_client()
+        # Health checks use a shorter timeout than normal fetches.
+        response = await client.get(
+            NEWS_LATEST_URL,
+            params=params,
+            timeout=httpx.Timeout(10.0),
+        )
 
-            if response.status_code == 200:
-                # Enforce 2MB response size cap
-                if len(response.content) >= 2_000_000:
-                    result = {"status": "unhealthy", "error": "Response too large (>=2MB)"}
-                    await cache_set("health:api", result, 60)
-                    return result
-                data = response.json()
-                if isinstance(data, dict) and data.get("status") == "error":
-                    results = data.get("results")
-                    if isinstance(results, dict):
-                        err = results.get("message", "Unknown error")
-                    else:
-                        err = data.get("message", "Unknown error")
-                    result = {"status": "unhealthy", "error": f"API error: {err}"}
-                    await cache_set("health:api", result, 60)
-                    return result
-
-                result = {
-                    "status": "healthy",
-                    "response_time": f"{response.elapsed.total_seconds():.2f}s",
-                }
+        if response.status_code == 200:
+            # Enforce 2MB response size cap
+            if len(response.content) >= 2_000_000:
+                result = {"status": "unhealthy", "error": "Response too large (>=2MB)"}
+                await cache_set("health:api", result, 60)
+                return result
+            data = response.json()
+            if isinstance(data, dict) and data.get("status") == "error":
+                results = data.get("results")
+                if isinstance(results, dict):
+                    err = results.get("message", "Unknown error")
+                else:
+                    err = data.get("message", "Unknown error")
+                result = {"status": "unhealthy", "error": f"API error: {err}"}
                 await cache_set("health:api", result, 60)
                 return result
 
-            if response.status_code == 401:
-                result = {"status": "unhealthy", "error": "Invalid API key"}
-            elif response.status_code == 429:
-                result = {"status": "unhealthy", "error": "Rate limit exceeded"}
-            else:
-                result = {"status": "unhealthy", "error": f"HTTP {response.status_code}"}
+            result = {
+                "status": "healthy",
+                "response_time": f"{response.elapsed.total_seconds():.2f}s",
+            }
             await cache_set("health:api", result, 60)
             return result
+
+        if response.status_code == 401:
+            result = {"status": "unhealthy", "error": "Invalid API key"}
+        elif response.status_code == 429:
+            result = {"status": "unhealthy", "error": "Rate limit exceeded"}
+        else:
+            result = {"status": "unhealthy", "error": f"HTTP {response.status_code}"}
+        await cache_set("health:api", result, 60)
+        return result
     except Exception as exc:
         result = {"status": "unhealthy", "error": str(exc)}
         await cache_set("health:api", result, 60)
