@@ -78,6 +78,48 @@ async def _handle_breaking_callback(query: CallbackQuery, chat_id: int, value: s
     )
 
 
+async def _handle_breakfollows_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
+    enabled = value == "1"
+    await set_user_prefs(chat_id, breaking_use_follows=enabled)
+    status = "ON" if enabled else "OFF"
+    _ = await query.edit_message_text(
+        f"✅ Using followed topics as breaking alerts: <b>{status}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _handle_dailyhour_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
+    try:
+        hour = int(value)
+    except ValueError:
+        _ = await query.edit_message_text("⚠️ Invalid hour.")
+        return
+    if not (0 <= hour <= 23):
+        _ = await query.edit_message_text("⚠️ Invalid hour.")
+        return
+    await set_user_prefs(chat_id, daily_hour=hour)
+    _ = await query.edit_message_text(
+        f"✅ Daily digest hour set to <b>{hour:02d}:00</b> (your timezone).",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _handle_tz_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
+    tz_name = value.strip()
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(tz_name)
+    except Exception:
+        _ = await query.edit_message_text("⚠️ Invalid timezone.")
+        return
+    await set_user_prefs(chat_id, timezone=tz_name)
+    _ = await query.edit_message_text(
+        f"✅ Timezone set to <b>{_escape_html(tz_name)}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def _handle_search_callback(
     query: CallbackQuery,
     chat_id: int,
@@ -195,7 +237,10 @@ async def _handle_confirm_or_cancel(
         deleted, _ = await _clear_chat_messages(
             bot=context.bot, chat_id=chat_id, from_id=orig_msg_id, window=60
         )
-        _ = await query.edit_message_text(f"🧹 Cleared {deleted} messages.")
+        _ = await query.edit_message_text(
+            f"🧹 Removed {deleted} message(s) the bot was allowed to delete "
+            "(not a full chat wipe)."
+        )
         return
 
     if kind == "unfollowall":
@@ -237,6 +282,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _handle_category_callback(query, chat_id, value)
     elif action == "breaking":
         await _handle_breaking_callback(query, chat_id, value)
+    elif action == "breakfollows":
+        await _handle_breakfollows_callback(query, chat_id, value)
+    elif action == "dailyhour":
+        await _handle_dailyhour_callback(query, chat_id, value)
+    elif action == "tz":
+        await _handle_tz_callback(query, chat_id, value)
     elif action == "search":
         await _handle_search_callback(query, chat_id, value)
     elif action == "follow":

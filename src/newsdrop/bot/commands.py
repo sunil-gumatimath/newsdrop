@@ -8,10 +8,15 @@ from telegram.ext import ContextTypes
 
 from ..config import (
     BREAKING_ALERT_INTERVAL_MINUTES,
+    BREAKING_ALERT_MAX_PER_DAY,
     CATEGORIES,
+    COMMON_TIMEZONES,
     COUNTRIES,
-    DAILY_NEWS_TIME,
+    DAILY_HOUR_CHOICES,
     DEFAULT_COUNTRY,
+    DEFAULT_DAILY_HOUR,
+    DEFAULT_TIMEZONE,
+    MAX_BREAKING_KEYWORDS_PER_USER,
 )
 from ..database import (
     add_followed_topic,
@@ -21,8 +26,11 @@ from ..database import (
     get_followed_topics,
     get_user_prefs,
     is_subscriber,
+    parse_breaking_keywords,
     remove_followed_topic,
     remove_subscriber,
+    serialize_breaking_keywords,
+    set_user_prefs,
 )
 from ..message_utils import send_chunked_message
 from ..metrics import (
@@ -69,6 +77,7 @@ from .helpers import (
     _resolve_trending_category,
     _sanitize_follow_topic,
     _send_trending_results,
+    is_admin_chat,
     logger,
 )
 
@@ -81,13 +90,13 @@ async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     await increment(COMMAND_TOTAL)
 
     welcome = (
-        "Welcome to Daily News Bot! 📰\n\n"
-        "Use /news to get today's news briefing.\n"
-        "Use /subscribe to receive daily news automatically.\n"
-        "Use /search <topic> to search for specific news.\n"
-        "Use /follow <topic> to follow a topic like AI or crypto.\n"
-        "Use /trending tech to view category-specific trends.\n"
-        "Use /help to see all commands."
+        "Welcome to newsdrop! 📰\n\n"
+        "Quick start:\n"
+        "1. /setcountry and /setcategory — pick your feed\n"
+        "2. /settimezone and /settime — when to get digests\n"
+        "3. /subscribe — daily briefing on autopilot\n"
+        "4. /follow AI — highlight topics you care about\n\n"
+        "Also: /news · /search · /breaking · /help"
     )
     _ = await message.reply_text(welcome)
 
@@ -372,10 +381,15 @@ async def subscribe(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None
 
     await add_subscriber(chat_id)
     prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    hour = prefs.get("daily_hour", str(DEFAULT_DAILY_HOUR))
+    tz = prefs.get("timezone", DEFAULT_TIMEZONE)
     _ = await message.reply_text(
-        f"✅ Subscribed! You'll receive daily news at {DAILY_NEWS_TIME} "
-        f"for {prefs['category']} news in {prefs['country'].upper()}.\n"
-        f"Use /unsubscribe to stop."
+        f"✅ Subscribed! You'll receive daily news around "
+        f"<b>{_escape_html(hour)}:00</b> ({_escape_html(tz)}) "
+        f"for {_escape_html(prefs['category'])} · "
+        f"{_escape_html(prefs['country'].upper())}.\n"
+        "Use /settime and /settimezone to change delivery. /unsubscribe to stop.",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -410,16 +424,31 @@ async def preferences(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
     breaking_enabled = await get_breaking_news_preference(chat_id)
     breaking_label = "ON" if breaking_enabled else "OFF"
     breaking_emoji = "🔔" if breaking_enabled else "🔕"
+    hour = prefs.get("daily_hour", str(DEFAULT_DAILY_HOUR))
+    tz = prefs.get("timezone", DEFAULT_TIMEZONE)
+    use_follows = prefs.get("breaking_use_follows", "1") != "0"
+    custom_kw = parse_breaking_keywords(prefs.get("breaking_keywords", ""))
+    quiet_start = prefs.get("quiet_start_hour", "")
+    quiet_end = prefs.get("quiet_end_hour", "")
+    if quiet_start != "" and quiet_end != "":
+        quiet_label = f"{quiet_start}:00–{quiet_end}:00"
+    else:
+        quiet_label = "off"
 
     text = (
         "⚙️ <b>Your Preferences</b>\n\n"
         f"🌍 Region: {_escape_html(country_name)}\n"
         f"📂 Category: {_escape_html(category.capitalize())}\n"
+        f"🕒 Digest: {_escape_html(hour)}:00 ({_escape_html(tz)})\n"
+        f"🌙 Quiet hours: {_escape_html(quiet_label)}\n"
         f"🏷️ Followed topics: {len(followed_topics)}\n"
-        f"{breaking_emoji} Breaking news: <b>{breaking_label}</b>\n\n"
-        "Use /setcountry and /setcategory to change these.\n"
-        "Use /follows to see your followed topics.\n"
-        "Use /breaking to toggle breaking news alerts."
+        f"{breaking_emoji} Breaking news: <b>{breaking_label}</b>\n"
+        f"   · Followed topics as alerts: {'ON' if use_follows else 'OFF'}\n"
+        f"   · Custom keywords: {len(custom_kw)}"
+        f"{(' — ' + _escape_html(', '.join(custom_kw))) if custom_kw else ''}\n"
+        f"   · Max {BREAKING_ALERT_MAX_PER_DAY}/day\n\n"
+        "/setcountry · /setcategory · /settime · /settimezone\n"
+        "/quiet · /breaking · /breakkeywords · /follows"
     )
     _ = await message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -431,26 +460,24 @@ async def help_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     help_text = (
-        "<b>Available Commands:</b>\n\n"
-        "/start - Start the bot\n"
-        "/news - Get news briefing (uses your preferences)\n"
-        "/search <topic> - Search for specific news\n"
-        "/follow <topic> - Follow a topic like AI or crypto\n"
-        "/unfollow <topic> - Stop following a topic\n"
-        "/follows - View followed topics\n"
-        "/topics - Alias for /follows\n"
-        "/unfollowall - Remove all followed topics\n"
-        "/subscribe - Enable daily news delivery\n"
-        "/unsubscribe - Disable daily news delivery\n"
-        "/setcountry - Choose your news region\n"
-        "/setcategory - Choose your news topic\n"
-        "/trending [category] - View trending topics, e.g. /trending tech\n"
-        "/breaking - Toggle breaking news alerts\n"
-        "/health - Check bot health status\n"
-        "/clear - Cleanup messages in the chat\n"
-        "/prefs - View your current preferences\n"
-        "/help - Show this help message\n"
-        "/commands - Show all commands"
+        "<b>newsdrop commands</b>\n\n"
+        "<b>Daily</b>\n"
+        "/news — briefing now\n"
+        "/subscribe · /unsubscribe — scheduled digests\n"
+        "/settime · /settimezone — delivery schedule\n"
+        "/setcountry · /setcategory · /prefs\n\n"
+        "<b>Discover</b>\n"
+        "/search &lt;topic&gt;\n"
+        "/trending [category]\n"
+        "/follow · /unfollow · /follows · /unfollowall\n\n"
+        "<b>Alerts</b>\n"
+        "/breaking — on/off + alert sources\n"
+        "/breakkeywords — personal alert keywords\n"
+        "/quiet — mute alerts overnight\n\n"
+        "<b>Utilities</b>\n"
+        "/clear — delete recent <i>bot</i> messages (not full chat history)\n"
+        "/help · /commands\n"
+        "/health — admin only (ops diagnostics)"
     )
 
     try:
@@ -458,27 +485,211 @@ async def help_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         logger.exception("Failed to send /help response")
         _ = await message.reply_text(
-            "Available Commands:\n\n"
-            "/start - Start the bot\n"
-            "/news - Get news briefing\n"
-            "/search <topic> - Search news\n"
-            "/follow <topic> - Follow a topic\n"
-            "/unfollow <topic> - Unfollow a topic\n"
-            "/follows - View followed topics\n"
-            "/topics - Alias for /follows\n"
-            "/unfollowall - Remove all followed topics\n"
-            "/subscribe - Enable daily news\n"
-            "/unsubscribe - Disable daily news\n"
-            "/setcountry - Choose your region\n"
-            "/setcategory - Choose your topic\n"
-            "/trending [category] - View category trends\n"
-            "/breaking - Toggle breaking alerts\n"
-            "/health - Check bot health\n"
-            "/clear - Cleanup messages in the chat\n"
-            "/prefs - View preferences\n"
-            "/help - Show this help message\n"
-            "/commands - Show all commands"
+            "newsdrop: /news /subscribe /setcountry /setcategory "
+            "/settime /settimezone /search /follow /breaking "
+            "/breakkeywords /quiet /prefs /clear /help"
         )
+
+
+async def set_time(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pick preferred local hour for the daily digest."""
+    message = update.effective_message
+    chat_id = _effective_chat_id(update)
+    if not message or chat_id is None:
+        return
+
+    prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    current = prefs.get("daily_hour", str(DEFAULT_DAILY_HOUR))
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{h:02d}:00" + (" ✓" if str(h) == str(current) else ""),
+                callback_data=f"dailyhour:{h}",
+            )
+            for h in DAILY_HOUR_CHOICES[i : i + 4]
+        ]
+        for i in range(0, len(DAILY_HOUR_CHOICES), 4)
+    ]
+    _ = await message.reply_text(
+        f"🕒 Current digest hour: <b>{_escape_html(current)}:00</b> "
+        f"({_escape_html(prefs.get('timezone', DEFAULT_TIMEZONE))})\n\n"
+        "Pick a local hour for your daily briefing:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set IANA timezone for digest timing and quiet hours."""
+    message = update.effective_message
+    chat_id = _effective_chat_id(update)
+    if not message or chat_id is None:
+        return
+
+    args = context.args or []
+    if args:
+        tz_name = args[0].strip()
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(tz_name)
+        except Exception:
+            _ = await message.reply_text(
+                "⚠️ Unknown timezone. Use an IANA name like "
+                "<code>America/New_York</code> or pick a button below.",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await set_user_prefs(chat_id, timezone=tz_name)
+            _ = await message.reply_text(
+                f"✅ Timezone set to <b>{_escape_html(tz_name)}</b>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+    prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    current = prefs.get("timezone", DEFAULT_TIMEZONE)
+    keyboard = [
+        [InlineKeyboardButton(tz + (" ✓" if tz == current else ""), callback_data=f"tz:{tz}")]
+        for tz in COMMON_TIMEZONES
+    ]
+    _ = await message.reply_text(
+        f"🌐 Current timezone: <b>{_escape_html(current)}</b>\n\n"
+        "Pick a timezone, or send "
+        "<code>/settimezone America/New_York</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def quiet_hours(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Configure quiet hours for breaking alerts: /quiet 22 7 or /quiet off."""
+    message = update.effective_message
+    chat_id = _effective_chat_id(update)
+    if not message or chat_id is None:
+        return
+
+    args = [a.lower() for a in (context.args or [])]
+    if not args or args[0] in {"help", "?"}:
+        prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+        qs, qe = prefs.get("quiet_start_hour", ""), prefs.get("quiet_end_hour", "")
+        current = f"{qs}:00–{qe}:00" if qs != "" and qe != "" else "off"
+        _ = await message.reply_text(
+            f"🌙 Quiet hours (local): <b>{_escape_html(current)}</b>\n\n"
+            "Usage:\n"
+            "<code>/quiet 22 7</code> — mute alerts 22:00–07:00\n"
+            "<code>/quiet off</code> — disable quiet hours",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if args[0] in {"off", "clear", "none", "disable"}:
+        await set_user_prefs(chat_id, clear_quiet_hours=True)
+        _ = await message.reply_text("✅ Quiet hours disabled.")
+        return
+
+    if len(args) < 2:
+        _ = await message.reply_text("⚠️ Need start and end hours, e.g. /quiet 22 7")
+        return
+
+    try:
+        start = int(args[0])
+        end = int(args[1])
+    except ValueError:
+        _ = await message.reply_text("⚠️ Hours must be integers 0–23.")
+        return
+
+    if not (0 <= start <= 23 and 0 <= end <= 23):
+        _ = await message.reply_text("⚠️ Hours must be between 0 and 23.")
+        return
+    if start == end:
+        _ = await message.reply_text("⚠️ Start and end must differ (or use /quiet off).")
+        return
+
+    await set_user_prefs(chat_id, quiet_start_hour=start, quiet_end_hour=end)
+    _ = await message.reply_text(
+        f"✅ Quiet hours set to <b>{start}:00–{end}:00</b> (your timezone).",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def breakkeywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manage personal breaking-alert keywords."""
+    message = update.effective_message
+    chat_id = _effective_chat_id(update)
+    if not message or chat_id is None:
+        return
+
+    args = context.args or []
+    prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    current = parse_breaking_keywords(prefs.get("breaking_keywords", ""))
+
+    if not args:
+        listed = ", ".join(current) if current else "(none — using follows and/or defaults)"
+        _ = await message.reply_text(
+            "🔑 <b>Breaking keywords</b>\n\n"
+            f"Current: {_escape_html(listed)}\n\n"
+            "Usage:\n"
+            "<code>/breakkeywords add earthquake</code>\n"
+            "<code>/breakkeywords remove earthquake</code>\n"
+            "<code>/breakkeywords clear</code>\n"
+            f"Limit: {MAX_BREAKING_KEYWORDS_PER_USER} keywords.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    action = args[0].lower()
+    rest = " ".join(args[1:]).strip()
+
+    if action == "clear":
+        await set_user_prefs(chat_id, breaking_keywords="")
+        _ = await message.reply_text("✅ Cleared custom breaking keywords.")
+        return
+
+    if action in {"add", "remove", "rm", "del"} and not rest:
+        _ = await message.reply_text("⚠️ Provide a keyword after the action.")
+        return
+
+    if action == "add":
+        cleaned = _sanitize_follow_topic(rest)
+        if len(cleaned) < 3:
+            _ = await message.reply_text("⚠️ Keyword must be at least 3 characters.")
+            return
+        existing = {k.lower(): k for k in current}
+        if cleaned.lower() in existing:
+            _ = await message.reply_text("You already have that keyword.")
+            return
+        if len(current) >= MAX_BREAKING_KEYWORDS_PER_USER:
+            _ = await message.reply_text(
+                f"⚠️ Max {MAX_BREAKING_KEYWORDS_PER_USER} keywords. Remove one first."
+            )
+            return
+        current.append(cleaned)
+        await set_user_prefs(chat_id, breaking_keywords=serialize_breaking_keywords(current))
+        _ = await message.reply_text(
+            f"✅ Added keyword <b>{_escape_html(cleaned)}</b>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action in {"remove", "rm", "del"}:
+        target = rest.lower()
+        new_list = [k for k in current if k.lower() != target]
+        if len(new_list) == len(current):
+            _ = await message.reply_text("⚠️ That keyword is not in your list.")
+            return
+        await set_user_prefs(chat_id, breaking_keywords=serialize_breaking_keywords(new_list))
+        _ = await message.reply_text(
+            f"✅ Removed keyword <b>{_escape_html(rest)}</b>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    _ = await message.reply_text(
+        "⚠️ Unknown action. Use add / remove / clear.\n"
+        "Example: <code>/breakkeywords add climate</code>",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def breaking_toggle(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -491,6 +702,10 @@ async def breaking_toggle(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
     await increment(COMMAND_BREAKING_TOGGLE)
 
     current_enabled = await get_breaking_news_preference(chat_id)
+    prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    use_follows = prefs.get("breaking_use_follows", "1") != "0"
+    custom = parse_breaking_keywords(prefs.get("breaking_keywords", ""))
+
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -498,15 +713,26 @@ async def breaking_toggle(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
                     "🔔 Turn ON" if not current_enabled else "🔕 Turn OFF",
                     callback_data=f"breaking:{1 if not current_enabled else 0}",
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    "📌 Follows as alerts: OFF" if use_follows else "📌 Follows as alerts: ON",
+                    callback_data=f"breakfollows:{0 if use_follows else 1}",
+                )
+            ],
         ]
     )
 
     status_text = "enabled" if current_enabled else "disabled"
+    custom_label = ", ".join(custom) if custom else "none"
     _ = await message.reply_text(
         f"🚨 Breaking news alerts are currently <b>{status_text}</b>.\n\n"
-        f"The bot checks every {BREAKING_ALERT_INTERVAL_MINUTES} minute(s) and sends "
-        "important stories for your selected region.",
+        f"Checks every {BREAKING_ALERT_INTERVAL_MINUTES} min for your region.\n"
+        f"Sources: custom keywords ({_escape_html(custom_label)}), "
+        f"{'followed topics, ' if use_follows else ''}"
+        "then global defaults if empty.\n"
+        f"Cap: {BREAKING_ALERT_MAX_PER_DAY}/day · quiet hours via /quiet\n"
+        "Manage keywords with /breakkeywords",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
     )
@@ -551,7 +777,14 @@ async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
+    chat_id = _effective_chat_id(update)
     if not message:
+        return
+
+    if not is_admin_chat(chat_id):
+        _ = await message.reply_text(
+            "🔒 /health is admin-only. Operators: set ADMIN_CHAT_IDS and use HTTP /health."
+        )
         return
 
     await increment(COMMAND_TOTAL)
@@ -608,14 +841,11 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def clear_chat(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/clear`` — ask for confirmation, then delete recent messages.
+    """``/clear`` — ask for confirmation, then try to delete recent bot-accessible messages.
 
-    The actual deletion is performed by the ``button_handler`` branch for
-    ``confirm:clear:<user_id>:<orig_msg_id>``, which calls
-    :func:`_clear_chat_messages` starting from the original ``/clear``
-    message id. Encoding the id in the callback keeps the existing
-    60-message-back behavior intact: we delete the 60 messages ending at the
-    ``/clear`` command itself, not the confirmation prompt.
+    Telegram only lets bots delete messages they are allowed to (typically their
+    own messages in private chats; admin rights required in groups). This is
+    not a full chat-history wipe.
     """
     message = update.effective_message
     user = update.effective_user
@@ -626,14 +856,17 @@ async def clear_chat(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> Non
     keyboard = [
         [
             InlineKeyboardButton(
-                "Yes, clear recent messages",
+                "Yes, clear what I can",
                 callback_data=f"confirm:clear:{user.id}:{message.message_id}",
             ),
             InlineKeyboardButton("Cancel", callback_data=f"cancel:clear:{user.id}"),
         ]
     ]
     _ = await message.reply_text(
-        "⚠️ This will delete the last ~60 messages in this chat, including "
-        "this command. Are you sure?",
+        "⚠️ This tries to delete the last ~60 messages the bot is allowed to "
+        "remove (usually <b>bot messages only</b> in private chats; groups "
+        "need admin delete rights). It does <b>not</b> wipe full chat history "
+        "or other users' messages. Continue?",
+        parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )

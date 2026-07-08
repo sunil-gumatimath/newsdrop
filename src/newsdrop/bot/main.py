@@ -18,13 +18,13 @@ from telegram.ext import (
 
 from ..config import (
     BREAKING_ALERT_INTERVAL_MINUTES,
-    DAILY_NEWS_TIME,
     TELEGRAM_BOT_TOKEN,
 )
 from ..logging_config import setup_logging
 from ..metrics import UNEXPECTED_ERRORS, increment
 from .callbacks import button_handler
 from .commands import (
+    breakkeywords,
     breaking_toggle,
     clear_chat,
     follow_topic,
@@ -33,9 +33,12 @@ from .commands import (
     list_followed_topics,
     news,
     preferences,
+    quiet_hours,
     search,
     set_category,
     set_country,
+    set_time,
+    set_timezone,
     start,
     subscribe,
     trending,
@@ -44,10 +47,7 @@ from .commands import (
     unsubscribe,
 )
 from .health_server import set_ready, start_health_server
-from .helpers import (
-    _parse_daily_time,
-    logger,
-)
+from .helpers import logger
 from .jobs import (
     send_breaking_news_alerts,
     send_daily_news,
@@ -57,26 +57,20 @@ from .jobs import (
 async def _setup_commands(
     application: Application[Any, Any, Any, Any, Any, Any],
 ) -> None:
+    # Keep the menu short; full list lives in /help.
     commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("news", "Get latest news briefing"),
-        BotCommand("search", "Search news by topic"),
-        BotCommand("follow", "Follow a topic like AI or crypto"),
-        BotCommand("unfollow", "Unfollow a topic"),
-        BotCommand("follows", "View followed topics"),
-        BotCommand("topics", "Alias for followed topics"),
-        BotCommand("unfollowall", "Remove all followed topics"),
         BotCommand("subscribe", "Enable daily news delivery"),
-        BotCommand("unsubscribe", "Disable daily news delivery"),
-        BotCommand("setcountry", "Choose your news region"),
-        BotCommand("setcategory", "Choose your news topic"),
-        BotCommand("prefs", "View your preferences"),
-        BotCommand("breaking", "Toggle breaking news alerts"),
-        BotCommand("trending", "View trending topics by category"),
-        BotCommand("health", "Check bot health status"),
-        BotCommand("clear", "Cleanup messages in the chat"),
+        BotCommand("search", "Search news by topic"),
+        BotCommand("follow", "Follow a topic"),
+        BotCommand("setcountry", "Choose news region"),
+        BotCommand("setcategory", "Choose news category"),
+        BotCommand("settime", "Set daily digest hour"),
+        BotCommand("settimezone", "Set your timezone"),
+        BotCommand("breaking", "Breaking news alerts"),
+        BotCommand("prefs", "View preferences"),
         BotCommand("help", "Show all commands"),
-        BotCommand("commands", "Show all commands"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -123,12 +117,6 @@ def main() -> None:
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
         sys.exit(1)
 
-    try:
-        daily_time = _parse_daily_time(DAILY_NEWS_TIME)
-    except ValueError as exc:
-        logger.error(str(exc))
-        return
-
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("news", news))
@@ -140,6 +128,10 @@ def main() -> None:
     app.add_handler(CommandHandler("unfollowall", unfollow_all_topics))
     app.add_handler(CommandHandler("setcountry", set_country))
     app.add_handler(CommandHandler("setcategory", set_category))
+    app.add_handler(CommandHandler("settime", set_time))
+    app.add_handler(CommandHandler("settimezone", set_timezone))
+    app.add_handler(CommandHandler("quiet", quiet_hours))
+    app.add_handler(CommandHandler("breakkeywords", breakkeywords))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("prefs", preferences))
@@ -157,7 +149,13 @@ def main() -> None:
         logger.error("Job queue is unavailable. Install job-queue dependencies.")
         return
 
-    app.job_queue.run_daily(send_daily_news, time=daily_time)
+    # Hourly tick: each subscriber is due when local hour == their preferred hour.
+    app.job_queue.run_repeating(
+        send_daily_news,
+        interval=3600,
+        first=30,
+        name="daily_news_hourly",
+    )
 
     if BREAKING_ALERT_INTERVAL_MINUTES > 0:
         app.job_queue.run_repeating(
@@ -193,7 +191,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    logger.info("Daily news scheduled for %s", DAILY_NEWS_TIME)
+    logger.info("Daily news job runs hourly; delivery uses each user's timezone/hour")
     logger.info("Bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
