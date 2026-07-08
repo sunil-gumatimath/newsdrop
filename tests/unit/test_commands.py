@@ -57,6 +57,9 @@ def test_start_sends_welcome():
     text = message.reply_text.call_args.args[0]
     assert "Welcome" in text
     assert "/news" in text
+    # Guided onboarding: region keyboard attached
+    kwargs = message.reply_text.call_args.kwargs
+    assert kwargs.get("reply_markup") is not None
 
 
 # ── /news ────────────────────────────────────────────────────────────────

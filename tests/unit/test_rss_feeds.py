@@ -286,3 +286,27 @@ class TestHasRssFor:
 
     def test_empty_string(self):
         assert rss_feeds.has_rss_for("") is False
+
+    def test_category_feeds_enable_unknown_country(self):
+        assert rss_feeds.has_rss_for("xx", category="technology") is True
+
+    def test_has_rss_category(self):
+        assert rss_feeds.has_rss_category("technology") is True
+        assert rss_feeds.has_rss_category("general") is False
+
+
+class TestFeedHealth:
+    def test_feed_disabled_after_consecutive_failures(self):
+        rss_feeds.reset_feed_health()
+        url = "https://example.com/broken.xml"
+        for _ in range(rss_feeds._FEED_FAILURE_THRESHOLD):
+            rss_feeds._record_feed_failure(url)
+        assert rss_feeds._feed_is_available(url) is False
+
+    def test_success_resets_failures(self):
+        rss_feeds.reset_feed_health()
+        url = "https://example.com/ok.xml"
+        rss_feeds._record_feed_failure(url)
+        rss_feeds._record_feed_success(url)
+        assert rss_feeds._feed_failures.get(url) is None
+        assert rss_feeds._feed_is_available(url) is True

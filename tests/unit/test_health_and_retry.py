@@ -82,15 +82,7 @@ class TestRetryLogic:
 
         call_count = 0
 
-        class _FailingAsyncClient:
-            """Async context manager that always raises APIClientError(500)."""
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, _exc_type, _exc, _tb):
-                return False
-
+        class _FailingClient:
             async def get(self, *_args, **_kwargs):
                 nonlocal call_count
                 call_count += 1
@@ -99,7 +91,9 @@ class TestRetryLogic:
         async def _run():
             with (
                 patch(
-                    "newsdrop.news_fetcher.httpx.AsyncClient", return_value=_FailingAsyncClient()
+                    "newsdrop.news_fetcher.get_http_client",
+                    new_callable=AsyncMock,
+                    return_value=_FailingClient(),
                 ),
                 patch(
                     "newsdrop.news_fetcher.api_budget_check",
@@ -125,13 +119,7 @@ class TestRetryLogic:
 
         call_count = 0
 
-        class _UnauthorizedAsyncClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, _exc_type, _exc, _tb):
-                return False
-
+        class _UnauthorizedClient:
             async def get(self, *_args, **_kwargs):
                 nonlocal call_count
                 call_count += 1
@@ -140,8 +128,9 @@ class TestRetryLogic:
         async def _run():
             with (
                 patch(
-                    "newsdrop.news_fetcher.httpx.AsyncClient",
-                    return_value=_UnauthorizedAsyncClient(),
+                    "newsdrop.news_fetcher.get_http_client",
+                    new_callable=AsyncMock,
+                    return_value=_UnauthorizedClient(),
                 ),
                 patch(
                     "newsdrop.news_fetcher.api_budget_check",
@@ -167,21 +156,14 @@ class TestRetryLogic:
 
         call_count = 0
 
-        class _FlakyAsyncClient:
+        class _FlakyClient:
             """Fails on first call, succeeds on second."""
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, _exc_type, _exc, _tb):
-                return False
 
             async def get(self, *_args, **_kwargs):
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:
                     raise APIClientError("Server error", status_code=500)
-                # Second call succeeds
                 mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.content = b'{"status": "ok", "results": []}'
@@ -190,7 +172,11 @@ class TestRetryLogic:
 
         async def _run():
             with (
-                patch("newsdrop.news_fetcher.httpx.AsyncClient", return_value=_FlakyAsyncClient()),
+                patch(
+                    "newsdrop.news_fetcher.get_http_client",
+                    new_callable=AsyncMock,
+                    return_value=_FlakyClient(),
+                ),
                 patch(
                     "newsdrop.news_fetcher.api_budget_check",
                     new_callable=AsyncMock,

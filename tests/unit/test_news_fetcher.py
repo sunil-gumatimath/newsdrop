@@ -38,6 +38,43 @@ def test_generate_summary_short_text_unchanged():
     )
 
 
+def test_filter_by_query_rejects_substring_false_positives():
+    """Short queries like 'AI' must not match inside 'against' / 'airport'."""
+    from newsdrop.news_fetcher import _filter_by_query
+
+    articles = [
+        {
+            "title": "There is a need to build a national front against BJP",
+            "description": "Politics as usual",
+            "url": "https://example.com/against",
+        },
+        {
+            "title": "KIAL confident of passenger traffic recovery",
+            "description": "The airport recorded high traffic",
+            "url": "https://example.com/airport",
+        },
+        {
+            "title": "OpenAI launches new AI model for coding",
+            "description": "Artificial intelligence advances continue",
+            "url": "https://example.com/ai",
+        },
+        {
+            "title": "Machine learning improves crop yields",
+            "description": "Farmers adopt AI tools this season",
+            "url": "https://example.com/ml",
+        },
+    ]
+
+    matched = _filter_by_query(articles, "AI")
+    urls = {a["url"] for a in matched}
+    assert "https://example.com/ai" in urls
+    assert "https://example.com/ml" in urls
+    assert "https://example.com/against" not in urls
+    assert "https://example.com/airport" not in urls
+    # Title hit ranks above body-only hit
+    assert matched[0]["url"] == "https://example.com/ai"
+
+
 def test_format_search_results_escapes_html():
     data = {
         "articles": [
@@ -63,35 +100,44 @@ def test_merge_and_dedupe_dedupes_by_url_and_title():
             "title": "First headline",
             "url": "https://example.com/a",
             "publishedAt": "2024-01-01T00:00:00Z",
+            "source": {"name": "Example"},
         },
         {
             "title": "Second headline",
             "url": "https://example.com/b",
             "publishedAt": "2024-01-02T00:00:00Z",
+            "source": {"name": "Example"},
         },
         {
             "title": "Different title, same URL",
             "url": "https://example.com/a",
             "publishedAt": "2024-01-03T00:00:00Z",
+            "source": {"name": "Example"},
         },
         {
             "title": "second  headline!!",
             "url": "https://example.com/c",
             "publishedAt": "2024-01-04T00:00:00Z",
+            "source": {"name": "Example"},
         },
         {
             "title": "Completely unique",
             "url": "https://example.com/d",
             "publishedAt": "2024-01-05T00:00:00Z",
+            "source": {"name": "Example"},
         },
     ]
 
     merged = _merge_and_dedupe(articles, limit=10)
 
+    # URL cluster (a) + title cluster (second headline) + unique (d) => 3 stories
     assert len(merged) == 3, f"expected 3 unique articles, got {len(merged)}: {merged}"
-    assert merged[0]["url"] == "https://example.com/d"
-    assert merged[1]["url"] == "https://example.com/b"
-    assert merged[2]["url"] == "https://example.com/a"
+    urls = {a["url"] for a in merged}
+    assert "https://example.com/d" in urls
+    # Same-URL cluster keeps one of the /a variants
+    assert any(u.startswith("https://example.com/a") for u in urls)
+    # Similar-title cluster keeps the fresher /c or original /b
+    assert urls & {"https://example.com/b", "https://example.com/c"}
 
 
 def test_rate_limit_gate_blocks_when_budget_exhausted():

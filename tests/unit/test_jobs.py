@@ -302,8 +302,20 @@ async def test_send_breaking_news_sends_alerts(tmp_db):
 
         await jobs.send_breaking_news_alerts(context)
 
-    # 2 articles × 2 subscribers × 2 calls each (1 header + 1 article send) = 8
-    assert context.bot.send_message.call_count == 8
+    # 2 articles × 2 subscribers × 1 compact alert each = 4
+    assert context.bot.send_message.call_count == 4
+    # Single-message format includes match reason + open button path
+    first_text = context.bot.send_message.call_args_list[0].kwargs.get("text") or (
+        context.bot.send_message.call_args_list[0].args[0]
+        if context.bot.send_message.call_args_list[0].args
+        else ""
+    )
+    # kwargs form: chat_id=..., text=...
+    sent_texts = [
+        (c.kwargs.get("text") or "") for c in context.bot.send_message.call_args_list
+    ]
+    assert any("Breaking" in t for t in sent_texts)
+    assert any("Matched" in t for t in sent_texts)
 
 
 @pytest.mark.asyncio
@@ -423,5 +435,7 @@ async def test_send_breaking_news_groups_by_country(tmp_db):
 
         await jobs.send_breaking_news_alerts(context)
 
-    # Only chat 100 (us) should receive the us article → 2 messages (header + article)
-    assert context.bot.send_message.call_count == 2
+    # Only chat 100 (us) should receive the us article → 1 compact alert
+    assert context.bot.send_message.call_count == 1
+    kwargs = context.bot.send_message.call_args.kwargs
+    assert kwargs.get("chat_id") == 100

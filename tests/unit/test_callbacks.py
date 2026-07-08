@@ -211,11 +211,15 @@ async def test_button_handler_search_action(tmp_db):
             return_value={"country": "us", "category": "general"},
         ),
         patch("newsdrop.bot.callbacks.search_news", new_callable=AsyncMock) as mock_search,
-        patch("newsdrop.bot.callbacks.format_search_results", return_value="Results for bitcoin"),
-        patch("newsdrop.bot.callbacks.send_chunked_message", new_callable=AsyncMock),
+        patch("newsdrop.bot.callbacks.build_search_payload") as mock_payload,
         patch("newsdrop.bot.callbacks.rate_limit_record", new_callable=AsyncMock),
     ):
-        mock_search.return_value = {"results": []}
+        from newsdrop.bot.helpers import DigestResult
+
+        mock_search.return_value = {"articles": [], "totalResults": 0}
+        mock_payload.return_value = DigestResult(
+            "Results for bitcoin", None, None
+        )
         await callbacks.button_handler(update, context)
 
     mock_search.assert_awaited_once()
