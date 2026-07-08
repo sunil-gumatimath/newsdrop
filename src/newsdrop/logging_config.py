@@ -52,3 +52,8 @@ def setup_logging() -> None:
         if getattr(existing, "set_name", None) and existing.name == "newsdrop":
             root.removeHandler(existing)
     root.addHandler(handler)
+
+    # Avoid logging full request URLs (Telegram bot tokens appear in httpx INFO lines).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
