@@ -6,6 +6,8 @@ Your personalized news briefing, delivered straight to Telegram.
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-2CA5E0.svg)
 
+**Self-host & open source:** run it alone on your machine/VPS with your own API keys, or fork and improve it under the MIT license. No hosted multi-tenant service — you operate the bot. Security notes: [SECURITY.md](./SECURITY.md).
+
 ---
 
 ## Features
@@ -25,6 +27,15 @@ Your personalized news briefing, delivered straight to Telegram.
 - **Graceful shutdown** — SIGTERM/SIGINT drains work and stops the job queue cleanly.
 
 See [FEATURE.md](./FEATURE.md) for the full command list and [AGENTS.md](./AGENTS.md) for architecture notes for coding agents.
+
+### Self-hosting vs open source
+
+| You want… | Do this |
+|-----------|---------|
+| Run it for yourself | Copy `.env.example` → `.env`, set tokens, `docker compose up` or `python -m newsdrop` |
+| Share the code | This repo is MIT — fork, star, open PRs |
+| Keep secrets safe | Never commit `.env`; rotate tokens if they leak — see [SECURITY.md](./SECURITY.md) |
+| Public multi-user bot | Turn on cooldowns (`NEWS_COOLDOWN_SECONDS` / `SEARCH_COOLDOWN_SECONDS`) and set `ADMIN_CHAT_IDS` |
 
 ---
 
@@ -292,6 +303,14 @@ uv run ruff check --fix .
 uv run ruff format .
 uv run mypy src/newsdrop
 ```
+
+---
+
+## Security
+
+Please report vulnerabilities privately when possible. Do not post live API tokens in issues or PRs.
+
+Full policy: [SECURITY.md](./SECURITY.md).
 
 ---
 

@@ -74,3 +74,4 @@ Bot menu (Telegram command list) includes: start, news, subscribe, search, follo
 
 - Architecture & agent notes: [AGENTS.md](./AGENTS.md)
 - Setup, env vars, deployment: [README.md](./README.md)
+- Security / secrets reporting: [SECURITY.md](./SECURITY.md)

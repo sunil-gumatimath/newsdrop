@@ -76,3 +76,7 @@ Required env vars (see `config.py` for defaults):
 - `DAILY_REQUEST_LIMIT` — local NewsData.io budget (default `200`)
 - `ADMIN_CHAT_IDS` — comma-separated chat IDs allowed to use `/health`
 - Breaking-alert knobs: `BREAKING_ALERT_INTERVAL_MINUTES`, `BREAKING_ALERT_MAX_PER_DAY`, `BREAKING_ALERT_KEYWORDS`, `BREAKING_USE_FOLLOWED_TOPICS`
+
+## Security (open source)
+
+Do not commit `.env` or real tokens. Vulnerability reports: prefer private channel — see [SECURITY.md](./SECURITY.md).
