@@ -18,6 +18,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 
 from ..config import (
+    ADMIN_CHAT_IDS,
     COUNTRIES,
 )
 from ..config import (
@@ -181,6 +182,13 @@ def _effective_chat_id(update: Update) -> int | None:
     return chat.id if chat else None
 
 
+def is_admin_chat(chat_id: int | None) -> bool:
+    """Return True if chat_id is listed in ADMIN_CHAT_IDS (ops commands)."""
+    if chat_id is None or not ADMIN_CHAT_IDS:
+        return False
+    return chat_id in ADMIN_CHAT_IDS
+
+
 def _parse_daily_time(value: str) -> time:
     try:
         parts = value.strip().split(":")
@@ -281,6 +289,12 @@ def _build_article_caption(index: int, article: Article) -> str:
     if rel_time:
         caption += f"⏱ {rel_time}\n"
     caption += f"📍 {source_escaped}"
+    if article.get("redditTrending") or article.get("crossConfirmed"):
+        subreddit = str(article.get("redditSubreddit", "") or "")
+        badge = "🔥 Also trending on Reddit"
+        if subreddit:
+            badge += f" · r/{_escape_html(subreddit)}"
+        caption += f"\n{badge}"
     return caption
 
 
@@ -390,6 +404,13 @@ def _format_news_digest(
         if description:
             lines.append(f"   {_escape_html(description)}")
 
+        if article.get("redditTrending") or article.get("crossConfirmed"):
+            subreddit = str(article.get("redditSubreddit", "") or "")
+            badge = "🔥 Also trending on Reddit"
+            if subreddit:
+                badge += f" · r/{_escape_html(subreddit)}"
+            lines.append(f"   {badge}")
+
         lines.append("")
 
     # Followed-topics highlight: zero-cost filter over already-fetched
@@ -427,6 +448,8 @@ def _format_news_digest(
                 source_labels.append("NewsData.io")
             elif s == "rss":
                 source_labels.append("RSS")
+            elif s == "reddit":
+                source_labels.append("Reddit")
             else:
                 source_labels.append(_escape_html(s))
         footer_parts.append(f"via {' + '.join(source_labels)}")
@@ -544,7 +567,11 @@ async def _clear_chat_messages(
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="❌ I need admin rights in this chat to delete messages.",
+                    text=(
+                        "❌ Can't delete more messages here. In groups the bot "
+                        "needs delete rights; in private chat it can only remove "
+                        "its own recent messages."
+                    ),
                 )
             except TelegramError as send_exc:
                 logger.warning("clear_chat could not post Forbidden notice: %s", send_exc)

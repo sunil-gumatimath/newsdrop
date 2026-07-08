@@ -21,10 +21,14 @@ import httpx
 from .config import (
     CATEGORY_KEYWORDS,
     DAILY_REQUEST_LIMIT,
+    ENABLE_REDDIT,
     ENABLE_RSS,
+    GLOBAL_COUNTRY_CODES,
     NEWS_API_KEY,
     WORD_RE,
 )
+from .cross_verify import apply_cross_verification
+from .reddit_feeds import fetch_reddit_posts, has_reddit_for
 from .rss_feeds import fetch_rss_articles, has_rss_for
 from .state import (
     api_budget_check,
@@ -312,6 +316,16 @@ def _merge_and_dedupe(*sources: list[Article], limit: int = 10) -> list[Article]
     return merged[:limit]
 
 
+async def _safe_fetch_reddit(country: str, category: str, limit_per_sub: int = 25) -> list[Article]:
+    if not ENABLE_REDDIT or not has_reddit_for(country, category):
+        return []
+    try:
+        return await fetch_reddit_posts(country, category, limit_per_sub=limit_per_sub)
+    except Exception as exc:
+        logger.warning("Reddit fetch failed for %s/%s: %s", country, category, exc)
+        return []
+
+
 async def _safe_fetch_rss(country: str, limit: int = 20) -> list[Article]:
     if not ENABLE_RSS or not has_rss_for(country):
         return []
@@ -355,6 +369,14 @@ def _filter_by_category(articles: list[Article], category: str) -> list[Article]
     return filtered
 
 
+def _api_country_param(country: str) -> str | None:
+    """Return NewsData country code, or None for world/global feeds."""
+    code = (country or "").strip().lower()
+    if not code or code in GLOBAL_COUNTRY_CODES:
+        return None
+    return code
+
+
 async def fetch_top_headlines(
     country: str = "us",
     category: str = "general",
@@ -362,23 +384,27 @@ async def fetch_top_headlines(
     mapped_category = CATEGORY_MAP.get(category, category)
     params: Params = {
         "apikey": NEWS_API_KEY or "",
-        "country": country,
         "language": "en",
         "size": 10,
     }
+    api_country = _api_country_param(country)
+    if api_country:
+        params["country"] = api_country
 
     if mapped_category and mapped_category != "top":
         params["category"] = mapped_category
 
-    api_result, rss_result = await asyncio.gather(
+    api_result, rss_result, reddit_result = await asyncio.gather(
         _fetch_news(params),
         _safe_fetch_rss(country, limit=20),
+        _safe_fetch_reddit(country, category),
         return_exceptions=True,
     )
 
     api_data: NewsResponse | None = None
     api_error: Exception | None = None
     rss_articles: list[Article] = []
+    reddit_posts: list[Article] = []
 
     if isinstance(api_result, Exception):
         api_error = api_result
@@ -391,6 +417,11 @@ async def fetch_top_headlines(
     elif isinstance(rss_result, list):
         rss_articles = rss_result
 
+    if isinstance(reddit_result, Exception):
+        logger.warning("Reddit fetch failed for %s/%s: %s", country, category, reddit_result)
+    elif isinstance(reddit_result, list):
+        reddit_posts = reddit_result
+
     rss_articles = _filter_by_category(rss_articles, category)
     api_articles = (api_data or {}).get("articles", [])
     api_articles = api_articles if isinstance(api_articles, list) else []
@@ -399,12 +430,16 @@ async def fetch_top_headlines(
         raise api_error
 
     merged = _merge_and_dedupe(api_articles, rss_articles, limit=10)
+    if reddit_posts:
+        merged = apply_cross_verification(merged, reddit_posts)
 
     sources_used: list[str] = []
     if api_articles:
         sources_used.append("newsdata.io")
     if rss_articles:
         sources_used.append("rss")
+    if reddit_posts:
+        sources_used.append("reddit")
 
     return {
         "status": "ok",
@@ -513,10 +548,12 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
 
         params: Params = {
             "apikey": NEWS_API_KEY or "",
-            "country": country,
             "language": "en",
             "size": 10,
         }
+        api_country = _api_country_param(country)
+        if api_country:
+            params["country"] = api_country
 
         cache_key = _get_cache_key(params)
         cached = await cache_get(cache_key)
@@ -706,60 +743,67 @@ async def _fetch_trending_for_country(
     mapped_category: str,
     category: str,
     keyword_counts: dict[str, int],
+    semaphore: asyncio.Semaphore | None = None,
 ) -> None:
     """Fetch articles for a single country and update keyword_counts in-place.
 
     Extracted so multiple countries can be fetched concurrently via gather().
+    Pass a semaphore to throttle how many countries fetch in flight at once.
     """
-    params: Params = {
-        "apikey": NEWS_API_KEY or "",
-        "country": country,
-        "language": "en",
-        "size": 10,
-    }
+    if semaphore is not None:
+        await semaphore.acquire()
+    try:
+        params: Params = {
+            "apikey": NEWS_API_KEY or "",
+            "country": country,
+            "language": "en",
+            "size": 10,
+        }
 
-    if mapped_category and mapped_category != "top":
-        params["category"] = mapped_category
+        if mapped_category and mapped_category != "top":
+            params["category"] = mapped_category
 
-    cache_key = _get_cache_key(params)
-    cached = await cache_get(cache_key)
-    if cached:
-        raw_articles = cached.get("articles", [])
-        articles = raw_articles if isinstance(raw_articles, list) else []
-    else:
-        try:
-            data = await _fetch_news(params)
-            raw_articles = data.get("articles", [])
+        cache_key = _get_cache_key(params)
+        cached = await cache_get(cache_key)
+        if cached:
+            raw_articles = cached.get("articles", [])
             articles = raw_articles if isinstance(raw_articles, list) else []
-        except Exception:
-            return
+        else:
+            try:
+                data = await _fetch_news(params)
+                raw_articles = data.get("articles", [])
+                articles = raw_articles if isinstance(raw_articles, list) else []
+            except Exception:
+                return
 
-    rss_articles = await _safe_fetch_rss(country, limit=20)
-    rss_articles = _filter_by_category(rss_articles, category)
-    articles = _merge_and_dedupe(articles, rss_articles, limit=20)
+        rss_articles = await _safe_fetch_rss(country, limit=20)
+        rss_articles = _filter_by_category(rss_articles, category)
+        articles = _merge_and_dedupe(articles, rss_articles, limit=20)
 
-    for article in articles:
-        title = str(article.get("title", "") or "")
-        for keyword in extract_keywords(title):
-            keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
+        for article in articles:
+            title = str(article.get("title", "") or "")
+            for keyword in extract_keywords(title):
+                keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
+    finally:
+        if semaphore is not None:
+            semaphore.release()
 
 
 async def fetch_trending_topics(countries: list[str], category: str = "general") -> dict[str, int]:
     keyword_counts: dict[str, int] = {}
     mapped_category = CATEGORY_MAP.get(category, category)
 
-    # Fetch all countries concurrently. Limit concurrency with a semaphore to
-    # avoid hammering the API with all requests at once when many countries
-    # are configured (9 countries × up to 2 requests each = 18 API calls).
+    # Fetch all countries concurrently. Each task acquires the semaphore
+    # internally, so concurrency is throttled to 3 in flight at once rather
+    # than hammering the API with all requests when many countries are
+    # configured (9 countries × up to 2 requests each = 18 API calls).
     semaphore = asyncio.Semaphore(3)
-    tasks = []
-    for country in countries:
-        async with semaphore:
-            tasks.append(
-                asyncio.create_task(
-                    _fetch_trending_for_country(country, mapped_category, category, keyword_counts)
-                )
-            )
+    tasks = [
+        asyncio.create_task(
+            _fetch_trending_for_country(country, mapped_category, category, keyword_counts, semaphore)
+        )
+        for country in countries
+    ]
     await asyncio.gather(*tasks)
 
     sorted_topics = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)
