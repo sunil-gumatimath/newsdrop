@@ -51,3 +51,28 @@ async def test_max_followed_topics_enforced(tmp_db):
 
     topics = await database.get_followed_topics(chat_id)
     assert len(topics) == 10, f"expected 10 stored topics, got {len(topics)}: {topics!r}"
+
+
+async def test_schedule_and_breaking_keyword_prefs(tmp_db):
+    chat_id = 42
+    await database.set_user_prefs(
+        chat_id,
+        timezone="America/New_York",
+        daily_hour=18,
+        quiet_start_hour=22,
+        quiet_end_hour=7,
+        breaking_keywords="AI, climate",
+        breaking_use_follows=False,
+    )
+    prefs = await database.get_user_prefs(chat_id)
+    assert prefs["timezone"] == "America/New_York"
+    assert prefs["daily_hour"] == "18"
+    assert prefs["quiet_start_hour"] == "22"
+    assert prefs["quiet_end_hour"] == "7"
+    assert prefs["breaking_use_follows"] == "0"
+    assert database.parse_breaking_keywords(prefs["breaking_keywords"]) == ["AI", "climate"]
+
+    await database.set_user_prefs(chat_id, clear_quiet_hours=True)
+    prefs = await database.get_user_prefs(chat_id)
+    assert prefs["quiet_start_hour"] == ""
+    assert prefs["quiet_end_hour"] == ""

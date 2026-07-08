@@ -351,6 +351,7 @@ def test_health_returns_status():
     update, message, context = _make_update()
 
     with (
+        patch("newsdrop.bot.commands.is_admin_chat", return_value=True),
         patch(
             "newsdrop.bot.commands.check_api_health",
             new_callable=AsyncMock,
@@ -379,6 +380,16 @@ def test_health_returns_status():
     text = message.reply_text.call_args.args[0]
     assert "Health" in text
     assert "42/200" in text
+
+
+def test_health_rejects_non_admin():
+    update, message, context = _make_update()
+
+    with patch("newsdrop.bot.commands.is_admin_chat", return_value=False):
+        asyncio.run(commands.health(update, context))
+
+    text = message.reply_text.call_args.args[0]
+    assert "admin" in text.lower()
 
 
 # ── /trending ────────────────────────────────────────────────────────────

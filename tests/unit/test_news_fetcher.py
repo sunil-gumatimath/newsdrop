@@ -9,6 +9,7 @@ from newsdrop.news_fetcher import (
     _merge_and_dedupe,
     _truncate_text,
     fetch_breaking_news,
+    fetch_top_headlines,
     format_search_results,
 )
 from newsdrop.state import (
@@ -158,3 +159,53 @@ def test_word_boundary_keyword_matcher_rejects_substring_FPs():
 
     matched = asyncio.run(_run_true_positive())
     assert len(matched) == 1, f"expected 'war' to match 'war declared', got {matched!r}"
+
+
+def test_fetch_top_headlines_applies_reddit_cross_verification():
+    async def _run():
+        api_payload = {
+            "status": "success",
+            "results": [
+                {
+                    "title": "Verified headline",
+                    "link": "https://example.com/verified",
+                    "description": "Details",
+                    "pubDate": "2025-01-02T00:00:00Z",
+                    "source_name": "ExampleNews",
+                },
+                {
+                    "title": "Regular headline",
+                    "link": "https://example.com/regular",
+                    "description": "Other details",
+                    "pubDate": "2025-01-03T00:00:00Z",
+                    "source_name": "ExampleNews",
+                },
+            ],
+        }
+        reddit_posts = [
+            {
+                "title": "Verified headline",
+                "url": "https://example.com/verified",
+                "redditSubreddit": "news",
+                "redditScore": 300,
+                "redditPermalink": "https://www.reddit.com/r/news/comments/abc",
+            }
+        ]
+
+        with (
+            patch("newsdrop.news_fetcher.ENABLE_REDDIT", True),
+            patch(
+                "newsdrop.news_fetcher._fetch_news",
+                return_value=news_fetcher._normalize_response(api_payload),
+            ),
+            patch("newsdrop.news_fetcher._safe_fetch_rss", return_value=[]),
+            patch("newsdrop.news_fetcher._safe_fetch_reddit", return_value=reddit_posts),
+        ):
+            result = await fetch_top_headlines("us", "general")
+
+        articles = result["articles"]
+        assert articles[0]["crossConfirmed"] is True
+        assert articles[0]["url"] == "https://example.com/verified"
+        assert "reddit" in result["sources"]
+
+    asyncio.run(_run())
