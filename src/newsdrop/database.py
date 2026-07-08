@@ -78,7 +78,13 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             chat_id INTEGER PRIMARY KEY,
             country TEXT NOT NULL DEFAULT 'us',
             category TEXT NOT NULL DEFAULT 'general',
-            breaking_news_enabled INTEGER NOT NULL DEFAULT 0
+            breaking_news_enabled INTEGER NOT NULL DEFAULT 0,
+            timezone TEXT NOT NULL DEFAULT 'UTC',
+            daily_hour INTEGER NOT NULL DEFAULT 8,
+            quiet_start_hour INTEGER,
+            quiet_end_hour INTEGER,
+            breaking_keywords TEXT NOT NULL DEFAULT '',
+            breaking_use_follows INTEGER NOT NULL DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS topic_follows (
@@ -113,7 +119,13 @@ def _migrate_user_preferences(conn: sqlite3.Connection) -> None:
                 chat_id INTEGER PRIMARY KEY,
                 country TEXT NOT NULL DEFAULT 'us',
                 category TEXT NOT NULL DEFAULT 'general',
-                breaking_news_enabled INTEGER NOT NULL DEFAULT 0
+                breaking_news_enabled INTEGER NOT NULL DEFAULT 0,
+                timezone TEXT NOT NULL DEFAULT 'UTC',
+                daily_hour INTEGER NOT NULL DEFAULT 8,
+                quiet_start_hour INTEGER,
+                quiet_end_hour INTEGER,
+                breaking_keywords TEXT NOT NULL DEFAULT '',
+                breaking_use_follows INTEGER NOT NULL DEFAULT 1
             )
             """
         )
@@ -137,6 +149,35 @@ def _migrate_user_preferences(conn: sqlite3.Connection) -> None:
             """
             ALTER TABLE user_preferences
             ADD COLUMN breaking_news_enabled INTEGER NOT NULL DEFAULT 0
+            """
+        )
+
+    if "timezone" not in columns:
+        conn.execute(
+            "ALTER TABLE user_preferences ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'"
+        )
+
+    if "daily_hour" not in columns:
+        conn.execute(
+            "ALTER TABLE user_preferences ADD COLUMN daily_hour INTEGER NOT NULL DEFAULT 8"
+        )
+
+    if "quiet_start_hour" not in columns:
+        conn.execute("ALTER TABLE user_preferences ADD COLUMN quiet_start_hour INTEGER")
+
+    if "quiet_end_hour" not in columns:
+        conn.execute("ALTER TABLE user_preferences ADD COLUMN quiet_end_hour INTEGER")
+
+    if "breaking_keywords" not in columns:
+        conn.execute(
+            "ALTER TABLE user_preferences ADD COLUMN breaking_keywords TEXT NOT NULL DEFAULT ''"
+        )
+
+    if "breaking_use_follows" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE user_preferences
+            ADD COLUMN breaking_use_follows INTEGER NOT NULL DEFAULT 1
             """
         )
 
@@ -296,13 +337,45 @@ async def is_subscriber(chat_id: int) -> bool:
 # ── User Preferences ─────────────────────────────────────────────────
 
 
+def _default_prefs(default_country: str = "us") -> dict[str, str]:
+    return {
+        "country": default_country,
+        "category": "general",
+        "timezone": "UTC",
+        "daily_hour": "8",
+        "quiet_start_hour": "",
+        "quiet_end_hour": "",
+        "breaking_keywords": "",
+        "breaking_use_follows": "1",
+    }
+
+
+def _row_to_prefs(row: sqlite3.Row, default_country: str = "us") -> dict[str, str]:
+    quiet_start = row["quiet_start_hour"] if "quiet_start_hour" in row.keys() else None
+    quiet_end = row["quiet_end_hour"] if "quiet_end_hour" in row.keys() else None
+    return {
+        "country": str(row["country"] if row["country"] is not None else default_country),
+        "category": str(row["category"] if row["category"] is not None else "general"),
+        "timezone": str(row["timezone"] if row["timezone"] else "UTC"),
+        "daily_hour": str(int(row["daily_hour"]) if row["daily_hour"] is not None else 8),
+        "quiet_start_hour": "" if quiet_start is None else str(int(quiet_start)),
+        "quiet_end_hour": "" if quiet_end is None else str(int(quiet_end)),
+        "breaking_keywords": str(row["breaking_keywords"] or ""),
+        "breaking_use_follows": "1"
+        if int(row["breaking_use_follows"] if row["breaking_use_follows"] is not None else 1)
+        else "0",
+    }
+
+
 def _get_user_prefs_sync(chat_id: int, default_country: str = "us") -> dict[str, str]:
     with _lock:
         conn = _get_connection()
         try:
             cursor = conn.execute(
                 """
-                SELECT country, category
+                SELECT country, category, timezone, daily_hour,
+                       quiet_start_hour, quiet_end_hour,
+                       breaking_keywords, breaking_use_follows
                 FROM user_preferences
                 WHERE chat_id = ?
                 """,
@@ -310,11 +383,8 @@ def _get_user_prefs_sync(chat_id: int, default_country: str = "us") -> dict[str,
             )
             row = cursor.fetchone()
             if row:
-                return {
-                    "country": row["country"],
-                    "category": row["category"],
-                }
-            return {"country": default_country, "category": "general"}
+                return _row_to_prefs(row, default_country)
+            return _default_prefs(default_country)
         finally:
             conn.close()
 
@@ -327,6 +397,13 @@ def _set_user_prefs_sync(
     chat_id: int,
     country: str | None = None,
     category: str | None = None,
+    timezone: str | None = None,
+    daily_hour: int | None = None,
+    quiet_start_hour: int | None = None,
+    quiet_end_hour: int | None = None,
+    clear_quiet_hours: bool = False,
+    breaking_keywords: str | None = None,
+    breaking_use_follows: bool | None = None,
 ) -> dict[str, str]:
     """Upsert user preferences. Only provided fields are updated."""
     with _lock:
@@ -334,7 +411,9 @@ def _set_user_prefs_sync(
         try:
             cursor = conn.execute(
                 """
-                SELECT country, category
+                SELECT country, category, timezone, daily_hour,
+                       quiet_start_hour, quiet_end_hour,
+                       breaking_keywords, breaking_use_follows
                 FROM user_preferences
                 WHERE chat_id = ?
                 """,
@@ -343,34 +422,73 @@ def _set_user_prefs_sync(
             row = cursor.fetchone()
 
             if row:
-                current = {
-                    "country": row["country"],
-                    "category": row["category"],
-                }
+                current = _row_to_prefs(row)
             else:
-                current = {
-                    "country": "us",
-                    "category": "general",
-                }
+                current = _default_prefs()
 
             if country is not None:
                 current["country"] = country
             if category is not None:
                 current["category"] = category
+            if timezone is not None:
+                current["timezone"] = timezone
+            if daily_hour is not None:
+                current["daily_hour"] = str(int(daily_hour))
+            if clear_quiet_hours:
+                current["quiet_start_hour"] = ""
+                current["quiet_end_hour"] = ""
+            else:
+                if quiet_start_hour is not None:
+                    current["quiet_start_hour"] = str(int(quiet_start_hour))
+                if quiet_end_hour is not None:
+                    current["quiet_end_hour"] = str(int(quiet_end_hour))
+            if breaking_keywords is not None:
+                current["breaking_keywords"] = breaking_keywords
+            if breaking_use_follows is not None:
+                current["breaking_use_follows"] = "1" if breaking_use_follows else "0"
+
+            quiet_start_db: int | None = (
+                int(current["quiet_start_hour"]) if current["quiet_start_hour"] != "" else None
+            )
+            quiet_end_db: int | None = (
+                int(current["quiet_end_hour"]) if current["quiet_end_hour"] != "" else None
+            )
 
             conn.execute(
                 """
                 INSERT INTO user_preferences (
                     chat_id,
                     country,
-                    category
+                    category,
+                    timezone,
+                    daily_hour,
+                    quiet_start_hour,
+                    quiet_end_hour,
+                    breaking_keywords,
+                    breaking_use_follows
                 )
-                VALUES (?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     country = excluded.country,
-                    category = excluded.category
+                    category = excluded.category,
+                    timezone = excluded.timezone,
+                    daily_hour = excluded.daily_hour,
+                    quiet_start_hour = excluded.quiet_start_hour,
+                    quiet_end_hour = excluded.quiet_end_hour,
+                    breaking_keywords = excluded.breaking_keywords,
+                    breaking_use_follows = excluded.breaking_use_follows
                 """,
-                (chat_id, current["country"], current["category"]),
+                (
+                    chat_id,
+                    current["country"],
+                    current["category"],
+                    current["timezone"],
+                    int(current["daily_hour"]),
+                    quiet_start_db,
+                    quiet_end_db,
+                    current["breaking_keywords"],
+                    1 if current["breaking_use_follows"] == "1" else 0,
+                ),
             )
             conn.commit()
             return current
@@ -382,8 +500,27 @@ async def set_user_prefs(
     chat_id: int,
     country: str | None = None,
     category: str | None = None,
+    timezone: str | None = None,
+    daily_hour: int | None = None,
+    quiet_start_hour: int | None = None,
+    quiet_end_hour: int | None = None,
+    clear_quiet_hours: bool = False,
+    breaking_keywords: str | None = None,
+    breaking_use_follows: bool | None = None,
 ) -> dict[str, str]:
-    return await asyncio.to_thread(_set_user_prefs_sync, chat_id, country, category)
+    return await asyncio.to_thread(
+        _set_user_prefs_sync,
+        chat_id,
+        country,
+        category,
+        timezone,
+        daily_hour,
+        quiet_start_hour,
+        quiet_end_hour,
+        clear_quiet_hours,
+        breaking_keywords,
+        breaking_use_follows,
+    )
 
 
 def _get_breaking_news_preference_sync(chat_id: int) -> bool:
@@ -558,6 +695,50 @@ def _cleanup_old_breaking_alerts_sync(days: int = 14) -> int:
 
 async def cleanup_old_breaking_alerts(days: int = 14) -> int:
     return await asyncio.to_thread(_cleanup_old_breaking_alerts_sync, days)
+
+
+def _count_breaking_alerts_today_sync(chat_id: int) -> int:
+    """Count breaking alerts delivered to a user since UTC midnight."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM breaking_alerts
+                WHERE chat_id = ?
+                  AND sent_at >= datetime('now', 'start of day')
+                """,
+                (chat_id,),
+            )
+            row = cursor.fetchone()
+            return int(row["count"]) if row else 0
+        finally:
+            conn.close()
+
+
+async def count_breaking_alerts_today(chat_id: int) -> int:
+    return await asyncio.to_thread(_count_breaking_alerts_today_sync, chat_id)
+
+
+def parse_breaking_keywords(raw: str) -> list[str]:
+    """Split stored keyword string into cleaned unique keywords."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for part in raw.replace(";", ",").split(","):
+        cleaned = " ".join(part.strip().split())
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def serialize_breaking_keywords(keywords: list[str]) -> str:
+    return ", ".join(keywords)
 
 
 # ── Topic Follows ────────────────────────────────────────────────────

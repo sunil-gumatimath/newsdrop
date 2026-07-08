@@ -15,14 +15,18 @@ This document contains a comprehensive list of all the features and commands imp
 | `/unfollowall` | [unfollow_all_topics](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L236) | Removes all custom topics you follow, requiring an inline confirmation first. |
 | `/subscribe` | [subscribe](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L307) | Enables daily automated news briefs delivered at your scheduled time. |
 | `/unsubscribe` | [unsubscribe](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L326) | Disables the daily automated news brief delivery. |
-| `/setcountry` | [set_country](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L261) | Allows you to choose your news region (supporting 10 countries) via inline buttons. |
-| `/setcategory` | [set_category](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L284) | Allows you to select your preferred news category (7 options) via inline buttons. |
-| `/prefs` | [preferences](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L340) | Displays your saved settings (region, category, subscription, and breaking news alerts). |
-| `/breaking` | [breaking_toggle](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L425) | Toggles the scheduled breaking news alerts check (every 30 minutes) on or off. |
-| `/trending [category]` | [trending](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L453) | Displays globally trending topics, optionally filtered by a specific category. |
-| `/health` | [health](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L479) | Checks and reports on database health, API rate limit usage, and connectivity status. |
-| `/clear` | [clear_chat](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L532) | Cleans up and deletes the last ~60 messages in the chat history after user confirmation. |
-| `/help` (alias `/commands`) | [help_command](file:///c:/Users/Tedz/OneDrive/Desktop/FUN/newsdrop/src/newsdrop/bot/commands.py#L368) | Displays the list of all available commands and how to use them. |
+| `/setcountry` | set_country | Region picker (includes **World / International** + 10 countries). |
+| `/setcategory` | set_category | Preferred news category (7 options) via inline buttons. |
+| `/settime` | set_time | Preferred local hour for the daily digest. |
+| `/settimezone` | set_timezone | IANA timezone for digests and quiet hours. |
+| `/quiet` | quiet_hours | Quiet hours for breaking alerts (`/quiet 22 7` or `/quiet off`). |
+| `/prefs` | preferences | Region, category, schedule, quiet hours, breaking settings. |
+| `/breaking` | breaking_toggle | Toggle alerts; optional “followed topics as alerts”. |
+| `/breakkeywords` | breakkeywords | Personal alert keywords (add/remove/clear). |
+| `/trending [category]` | trending | Trending topics, optionally by category. |
+| `/health` | health | **Admin only** (`ADMIN_CHAT_IDS`); ops diagnostics. Prefer HTTP `/health`. |
+| `/clear` | clear_chat | Tries to delete recent **bot-accessible** messages (not full chat history). |
+| `/help` (alias `/commands`) | help_command | Grouped command list (Daily / Discover / Alerts / Utilities). |
 
 ## Core Integration Architecture
 

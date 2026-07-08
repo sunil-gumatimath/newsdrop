@@ -230,6 +230,7 @@ Set these in your `.env` file or via environment variables:
 | `BREAKING_ALERT_INTERVAL_MINUTES` | `30` | Interval to check for breaking news alerts. Set to `0` to disable |
 | `BREAKING_ALERT_RETENTION_DAYS` | `14` | Days to retain sent-alert records to prevent duplicate alerts |
 | `BREAKING_ALERT_KEYWORDS` | *Built-in list* | Comma-separated words to detect breaking stories (e.g. `breaking,war,earthquake`) |
+| `ENABLE_REDDIT` | `0` | Optional Reddit cross-confirmation. Set to `1` to boost stories that appear in both news/RSS outlets and curated subreddits. No Reddit API key required. Default off |
 
 ---
 
@@ -272,8 +273,9 @@ To remain resilient against rate limits and outages, `newsdrop` fetches in paral
 
 1. **NewsData.io API** request for the primary headline set or search query.
 2. **RSS feeds** from national sources (e.g., NPR, BBC, The Guardian, Times of India, France 24, NDTV, Reuters, Associated Press).
-3. **De-duplication** by normalized URL and title, sorted by publish time.
-4. **Graceful degradation** — if the API is down or rate-limited, the bot still serves RSS results.
+3. **Optional Reddit cross-confirmation** — when `ENABLE_REDDIT=1`, stories also found in curated subreddits are boosted and annotated (e.g. a "✅ Cross-confirmed" badge), adding a community-signal layer to ranking. Off by default.
+4. **De-duplication** by normalized URL and title, sorted by publish time.
+5. **Graceful degradation** — if the API is down or rate-limited, the bot still serves RSS results.
 
 ---
 

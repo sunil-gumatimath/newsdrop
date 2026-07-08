@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 # match the NewsData.io `country` param used elsewhere.  Each feed is:
 #   (source_display_name, url)
 RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
+    "world": [
+        ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
+        ("The Guardian World", "https://www.theguardian.com/world/rss"),
+        ("Reuters", "https://openrss.org/feed/www.reuters.com"),
+        ("Associated Press", "https://openrss.org/feed/apnews.com"),
+        ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+        ("NPR World", "https://feeds.npr.org/1004/rss.xml"),
+    ],
     "in": [
         ("Times of India", "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"),
         ("The Hindu", "https://www.thehindu.com/news/national/feeder/default.rss"),
