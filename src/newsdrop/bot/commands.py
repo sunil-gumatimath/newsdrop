@@ -52,7 +52,6 @@ from ..news_fetcher import (
     APIClientError,
     check_api_health,
     fetch_top_headlines,
-    format_search_results,
     get_request_count,
     search_news,
 )
@@ -77,6 +76,7 @@ from .helpers import (
     _resolve_trending_category,
     _sanitize_follow_topic,
     _send_trending_results,
+    build_search_payload,
     is_admin_chat,
     logger,
 )
@@ -89,16 +89,20 @@ async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await increment(COMMAND_TOTAL)
 
+    from .helpers import country_keyboard
+
     welcome = (
-        "Welcome to newsdrop! 📰\n\n"
-        "Quick start:\n"
-        "1. /setcountry and /setcategory — pick your feed\n"
-        "2. /settimezone and /settime — when to get digests\n"
-        "3. /subscribe — daily briefing on autopilot\n"
-        "4. /follow AI — highlight topics you care about\n\n"
-        "Also: /news · /search · /breaking · /help"
+        "Welcome to <b>newsdrop</b> 📰\n\n"
+        "Personalized headlines in Telegram — multi-source, ranked, short blurbs.\n\n"
+        "<b>Step 1 of 3 — pick your region</b>\n"
+        "Then choose a category and (optionally) subscribe to a daily briefing.\n\n"
+        "You can also jump ahead: /news · /help"
     )
-    _ = await message.reply_text(welcome)
+    _ = await message.reply_text(
+        welcome,
+        parse_mode=ParseMode.HTML,
+        reply_markup=country_keyboard(onboarding=True),
+    )
 
 
 async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -146,6 +150,7 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
             _ = await status_msg.edit_text(
                 result.empty_message,
                 parse_mode=ParseMode.HTML,
+                reply_markup=result.reply_markup,
             )
             return
 
@@ -157,6 +162,7 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
                 result.digest,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
+                reply_markup=result.reply_markup,
             )
         else:
             with contextlib.suppress(Exception):
@@ -167,6 +173,13 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
+            # Attach open-article buttons on a short follow-up when chunked.
+            if result.reply_markup is not None:
+                with contextlib.suppress(Exception):
+                    _ = await message.reply_text(
+                        "📖 Open full articles:",
+                        reply_markup=result.reply_markup,
+                    )
 
         # Record the successful call for cooldown tracking.
         await rate_limit_record(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS)
@@ -216,14 +229,42 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         data = await search_news(query, country)
-        results = format_search_results(data, query)
-        _ = await status_msg.delete()
-        await send_chunked_message(
-            message,
-            results,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        result = build_search_payload(data, query)
+
+        if result.empty_message:
+            _ = await status_msg.edit_text(
+                result.empty_message,
+                parse_mode=ParseMode.HTML,
+                reply_markup=result.reply_markup,
+            )
+            await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
+            return
+
+        if result.digest is None:
+            return
+
+        if len(result.digest) <= 4096:
+            _ = await status_msg.edit_text(
+                result.digest,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=result.reply_markup,
+            )
+        else:
+            with contextlib.suppress(Exception):
+                await status_msg.delete()
+            await send_chunked_message(
+                message,
+                result.digest,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            if result.reply_markup is not None:
+                with contextlib.suppress(Exception):
+                    _ = await message.reply_text(
+                        "📖 Open results / follow topic:",
+                        reply_markup=result.reply_markup,
+                    )
         await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
     except APIClientError:
         await increment(NEWS_API_ERRORS)
@@ -326,12 +367,8 @@ async def set_country(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
     if not message or chat_id is None:
         return
 
-    keyboard = [
-        [InlineKeyboardButton(display, callback_data=f"country:{code}")]
-        for display, code in COUNTRIES.items()
-    ]
+    from .helpers import country_keyboard
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
     current = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     current_code = current.get("country", DEFAULT_COUNTRY)
     current_name = _country_name_from_code(current_code)
@@ -339,7 +376,7 @@ async def set_country(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
     _ = await message.reply_text(
         f"🌍 Current region: <b>{_escape_html(current_name)}</b>\n\nSelect your news region:",
         parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup,
+        reply_markup=country_keyboard(onboarding=False),
     )
 
 
@@ -349,12 +386,8 @@ async def set_category(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
     if not message or chat_id is None:
         return
 
-    keyboard = [
-        [InlineKeyboardButton(cat.capitalize(), callback_data=f"category:{cat}")]
-        for cat in CATEGORIES
-    ]
+    from .helpers import category_keyboard
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
     current = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     current_cat = current.get("category", "general")
 
@@ -362,7 +395,7 @@ async def set_category(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
         f"📂 Current category: <b>{_escape_html(current_cat.capitalize())}</b>\n\n"
         f"Select your news topic:",
         parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup,
+        reply_markup=category_keyboard(onboarding=False),
     )
 
 
@@ -475,7 +508,7 @@ async def help_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
         "/breakkeywords — personal alert keywords\n"
         "/quiet — mute alerts overnight\n\n"
         "<b>Utilities</b>\n"
-        "/clear — delete recent <i>bot</i> messages (not full chat history)\n"
+        "/clear — clear recent chat (bot messages; confirm first)\n"
         "/help · /commands\n"
         "/health — admin only (ops diagnostics)"
     )
@@ -841,11 +874,10 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def clear_chat(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/clear`` — ask for confirmation, then try to delete recent bot-accessible messages.
+    """``/clear`` — confirm, then delete recent messages the bot is allowed to remove.
 
-    Telegram only lets bots delete messages they are allowed to (typically their
-    own messages in private chats; admin rights required in groups). This is
-    not a full chat-history wipe.
+    In private chat this usually clears the bot's recent messages (Telegram
+    limit: ~48h). It cannot wipe full Telegram history or every user message.
     """
     message = update.effective_message
     user = update.effective_user
@@ -856,17 +888,20 @@ async def clear_chat(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> Non
     keyboard = [
         [
             InlineKeyboardButton(
-                "Yes, clear what I can",
+                "🧹 Yes, clear chat",
                 callback_data=f"confirm:clear:{user.id}:{message.message_id}",
             ),
             InlineKeyboardButton("Cancel", callback_data=f"cancel:clear:{user.id}"),
         ]
     ]
     _ = await message.reply_text(
-        "⚠️ This tries to delete the last ~60 messages the bot is allowed to "
-        "remove (usually <b>bot messages only</b> in private chats; groups "
-        "need admin delete rights). It does <b>not</b> wipe full chat history "
-        "or other users' messages. Continue?",
+        "🧹 <b>Clear chat?</b>\n\n"
+        "I'll delete recent messages I'm allowed to remove "
+        "(usually <b>my messages</b> from the last ~48 hours).\n\n"
+        "• Private chat: bot messages only\n"
+        "• Groups: needs delete permission\n"
+        "• Not a full Telegram history wipe\n\n"
+        "Continue?",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )

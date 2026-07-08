@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 from telegram import CallbackQuery, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
@@ -8,19 +10,24 @@ from ..config import (
     CATEGORIES,
     COUNTRIES,
     DEFAULT_COUNTRY,
+    DEFAULT_DAILY_HOUR,
+    DEFAULT_TIMEZONE,
 )
 from ..database import (
     add_followed_topic,
+    add_subscriber,
     clear_followed_topics,
+    get_followed_topics,
     get_user_prefs,
+    is_subscriber,
     remove_followed_topic,
     set_breaking_news_preference,
     set_user_prefs,
 )
-from ..message_utils import send_chunked_message
+from ..metrics import COMMAND_NEWS, COMMAND_TOTAL, NEWS_API_ERRORS, increment
 from ..news_fetcher import (
     APIClientError,
-    format_search_results,
+    fetch_top_headlines,
     search_news,
 )
 from ..state import (
@@ -30,13 +37,18 @@ from ..state import (
 from .helpers import (
     SEARCH_COOLDOWN_SECONDS,
     SEARCH_RATE_LIMIT_SCOPE,
+    _build_digest_payload,
     _clear_chat_messages,
     _country_name_from_code,
     _effective_chat_id,
     _escape_html,
     _parse_callback_data,
     _sanitize_follow_topic,
+    build_search_payload,
+    category_keyboard,
+    country_keyboard,
     logger,
+    onboarding_finish_keyboard,
 )
 
 
@@ -50,7 +62,8 @@ async def _handle_country_callback(query: CallbackQuery, chat_id: int, value: st
     name = _country_name_from_code(value)
     await set_user_prefs(chat_id, country=value)
     _ = await query.edit_message_text(
-        f"✅ Region set to <b>{_escape_html(name)}</b>",
+        f"✅ Region set to <b>{_escape_html(name)}</b>\n\n"
+        "Use /setcategory to pick a topic, or /news for a briefing.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -63,9 +76,137 @@ async def _handle_category_callback(query: CallbackQuery, chat_id: int, value: s
 
     await set_user_prefs(chat_id, category=value)
     _ = await query.edit_message_text(
-        f"✅ Category set to <b>{_escape_html(value.capitalize())}</b>",
+        f"✅ Category set to <b>{_escape_html(value.capitalize())}</b>\n\n"
+        "Tap /news for a briefing, or /subscribe for daily delivery.",
         parse_mode=ParseMode.HTML,
     )
+
+
+async def _handle_obcountry_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
+    valid_codes = set(COUNTRIES.values())
+    if value not in valid_codes:
+        _ = await query.edit_message_text("⚠️ Invalid region selection.")
+        return
+
+    name = _country_name_from_code(value)
+    await set_user_prefs(chat_id, country=value)
+    _ = await query.edit_message_text(
+        f"✅ Region: <b>{_escape_html(name)}</b>\n\n"
+        "<b>Step 2 of 3 — pick a category</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=category_keyboard(onboarding=True),
+    )
+
+
+async def _handle_obcategory_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
+    if value not in CATEGORIES:
+        _ = await query.edit_message_text("⚠️ Invalid category selection.")
+        return
+
+    await set_user_prefs(chat_id, category=value)
+    prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    region = _country_name_from_code(prefs.get("country", DEFAULT_COUNTRY))
+    _ = await query.edit_message_text(
+        f"✅ Feed ready\n"
+        f"🌍 {_escape_html(region)}  ·  📂 {_escape_html(value.capitalize())}\n\n"
+        "<b>Step 3 of 3 — daily delivery?</b>\n"
+        "Subscribe for an automatic briefing at your local hour "
+        f"(default {DEFAULT_DAILY_HOUR}:00 {DEFAULT_TIMEZONE}).\n"
+        "Change anytime with /settime and /settimezone.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=onboarding_finish_keyboard(),
+    )
+
+
+async def _handle_obsub_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
+    if value == "1":
+        if not await is_subscriber(chat_id):
+            await add_subscriber(chat_id)
+        prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+        hour = prefs.get("daily_hour", str(DEFAULT_DAILY_HOUR))
+        tz = prefs.get("timezone", DEFAULT_TIMEZONE)
+        _ = await query.edit_message_text(
+            f"🎉 <b>You're set!</b>\n\n"
+            f"✅ Daily briefing around <b>{_escape_html(str(hour))}:00</b> "
+            f"({_escape_html(str(tz))})\n"
+            f"🌍 {_escape_html(prefs.get('country', DEFAULT_COUNTRY).upper())}  ·  "
+            f"📂 {_escape_html(prefs.get('category', 'general').capitalize())}\n\n"
+            "Try /news now · /follow AI · /breaking for alerts · /help",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    _ = await query.edit_message_text(
+        "👍 Setup complete without a daily subscription.\n\n"
+        "Use /news anytime · /subscribe later · /help for more.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _handle_obnews_callback(query: CallbackQuery, chat_id: int) -> None:
+    """Finish onboarding by sending a live briefing in-place."""
+    await increment(COMMAND_TOTAL)
+    await increment(COMMAND_NEWS)
+    prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    country = prefs.get("country", DEFAULT_COUNTRY)
+    category = prefs.get("category", "general")
+    followed = await get_followed_topics(chat_id)
+
+    _ = await query.edit_message_text("📰 Fetching your first briefing...")
+    try:
+        data = await fetch_top_headlines(country, category)
+        result = _build_digest_payload(data, category, country, followed)
+        if result.empty_message:
+            _ = await query.edit_message_text(
+                result.empty_message,
+                parse_mode=ParseMode.HTML,
+                reply_markup=result.reply_markup,
+            )
+            return
+        if result.digest is None:
+            return
+        # Telegram edit_message_text max is 4096; fall back to truncated if needed.
+        text = result.digest
+        if len(text) > 4000:
+            text = text[:3990] + "…"
+        _ = await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=result.reply_markup,
+        )
+    except APIClientError:
+        await increment(NEWS_API_ERRORS)
+        _ = await query.edit_message_text(
+            "🔧 Could not fetch news right now. Try /news in a moment."
+        )
+    except Exception:
+        logger.exception("Onboarding news fetch failed")
+        _ = await query.edit_message_text(
+            "🔧 Something went wrong. Try /news in a moment."
+        )
+
+
+async def _handle_menu_callback(query: CallbackQuery, value: str) -> None:
+    if value == "country":
+        _ = await query.edit_message_text(
+            "🌍 Select your news region:",
+            reply_markup=country_keyboard(onboarding=False),
+        )
+    elif value == "category":
+        _ = await query.edit_message_text(
+            "📂 Select your news category:",
+            reply_markup=category_keyboard(onboarding=False),
+        )
+    elif value == "search_hint":
+        _ = await query.edit_message_text(
+            "🔍 Search for a topic:\n\n"
+            "<code>/search bitcoin</code>\n"
+            "<code>/search climate</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        _ = await query.edit_message_text("⚠️ Unknown menu action.")
 
 
 async def _handle_breaking_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
@@ -149,14 +290,21 @@ async def _handle_search_callback(
 
     try:
         data_search = await search_news(topic, country)
-        results = format_search_results(data_search, topic)
-        _ = await status_msg.delete()
-        await send_chunked_message(
-            query.message,
-            results,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        result = build_search_payload(data_search, topic)
+        if result.empty_message:
+            _ = await status_msg.edit_text(
+                result.empty_message,
+                parse_mode=ParseMode.HTML,
+                reply_markup=result.reply_markup,
+            )
+        elif result.digest is not None:
+            text = result.digest if len(result.digest) <= 4096 else result.digest[:3990] + "…"
+            _ = await status_msg.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=result.reply_markup,
+            )
         await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
     except APIClientError:
         logger.exception("Callback search failed")
@@ -233,14 +381,51 @@ async def _handle_confirm_or_cancel(
             logger.warning("Malformed clear callback: %s", data)
             _ = await query.edit_message_text("⚠️ Invalid selection.")
             return
-        orig_msg_id = int(parts[1])
+        try:
+            orig_msg_id = int(parts[1])
+        except ValueError:
+            _ = await query.edit_message_text("⚠️ Invalid selection.")
+            return
+
+        # Start from the confirmation message (newest), not only /clear.
+        confirm_id = query.message.message_id if query.message else orig_msg_id
+        start_id = max(confirm_id, orig_msg_id)
+
+        with contextlib.suppress(Exception):
+            _ = await query.edit_message_text("🧹 Clearing chat…")
+
         deleted, _ = await _clear_chat_messages(
-            bot=context.bot, chat_id=chat_id, from_id=orig_msg_id, window=60
+            bot=context.bot,
+            chat_id=chat_id,
+            from_id=start_id,
+            window=150,
         )
-        _ = await query.edit_message_text(
-            f"🧹 Removed {deleted} message(s) the bot was allowed to delete "
-            "(not a full chat wipe)."
+
+        # Confirmation may already be gone; always send a fresh status.
+        status = (
+            f"🧹 <b>Chat cleared</b>\n"
+            f"Removed <b>{deleted}</b> message(s) I could delete.\n\n"
+            "Tip: your typed messages may remain (Telegram only lets me "
+            "delete my own in private chats). Use /news to start fresh."
+            if deleted
+            else (
+                "🧹 Nothing new to delete (messages may be too old, already "
+                "gone, or not mine).\n\n"
+                "In private chat I can only remove <b>my</b> recent messages."
+            )
         )
+        try:
+            if query.message:
+                _ = await query.edit_message_text(status, parse_mode=ParseMode.HTML)
+            else:
+                _ = await context.bot.send_message(
+                    chat_id=chat_id, text=status, parse_mode=ParseMode.HTML
+                )
+        except Exception:
+            with contextlib.suppress(Exception):
+                _ = await context.bot.send_message(
+                    chat_id=chat_id, text=status, parse_mode=ParseMode.HTML
+                )
         return
 
     if kind == "unfollowall":
@@ -280,6 +465,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _handle_country_callback(query, chat_id, value)
     elif action == "category":
         await _handle_category_callback(query, chat_id, value)
+    elif action == "obcountry":
+        await _handle_obcountry_callback(query, chat_id, value)
+    elif action == "obcategory":
+        await _handle_obcategory_callback(query, chat_id, value)
+    elif action == "obsub":
+        await _handle_obsub_callback(query, chat_id, value)
+    elif action == "obnews":
+        await _handle_obnews_callback(query, chat_id)
+    elif action == "menu":
+        await _handle_menu_callback(query, value)
     elif action == "breaking":
         await _handle_breaking_callback(query, chat_id, value)
     elif action == "breakfollows":

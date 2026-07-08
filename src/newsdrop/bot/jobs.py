@@ -40,11 +40,13 @@ from ..news_fetcher import (
     fetch_breaking_news,
     fetch_top_headlines,
 )
+from telegram import InlineKeyboardMarkup
+
 from .helpers import (
     _build_digest_payload,
     _get_article_key,
     _safe_url,
-    _send_article,
+    format_breaking_alert,
     logger,
 )
 
@@ -126,17 +128,32 @@ def resolve_alert_keywords(
     return keywords
 
 
-def article_matches_keywords(article: dict, keywords: list[str]) -> bool:
+def matching_alert_keywords(article: dict, keywords: list[str]) -> list[str]:
+    """Return keywords that trigger an alert for this article (quieter rules).
+
+    Prefer a **title** hit. Body-only matches need ≥2 keywords so one weak
+    word in a description does not fire a noisy alert.
+    """
     if not keywords:
-        return False
+        return []
     title = str(article.get("title", "")).lower()
     description = str(article.get("description", "")).lower()
     combined = f"{title} {description}"
     matched = [
         kw for kw in keywords if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
     ]
+    if not matched:
+        return []
     title_hits = [kw for kw in matched if re.search(rf"\b{re.escape(kw.lower())}\b", title)]
-    return bool(title_hits or len(matched) >= 2)
+    if title_hits:
+        return title_hits
+    if len(matched) >= 2:
+        return matched
+    return []
+
+
+def article_matches_keywords(article: dict, keywords: list[str]) -> bool:
+    return bool(matching_alert_keywords(article, keywords))
 
 
 async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -212,7 +229,8 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         for chat_id in chat_ids:
             keywords = chat_keywords.get(chat_id, [])
-            if not article_matches_keywords(article, keywords):
+            matched_kws = matching_alert_keywords(article, keywords)
+            if not matched_kws:
                 continue
 
             already = per_user_sent.get(chat_id, 0)
@@ -231,17 +249,27 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             title = str(article.get("title", ""))
             url = _safe_url(article.get("url", ""))
+            next_count = per_user_sent.get(chat_id, 0) + 1
 
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="🚨 <b>Breaking News Alert</b>",
-                    parse_mode=ParseMode.HTML,
+                text, markup = format_breaking_alert(
+                    article,
+                    matched_kws,
+                    used_today=next_count,
+                    max_per_day=BREAKING_ALERT_MAX_PER_DAY,
                 )
-                await _send_article(context.bot, chat_id, article, 1)
+                send_kwargs: dict = {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": ParseMode.HTML,
+                    "disable_web_page_preview": True,
+                }
+                if isinstance(markup, InlineKeyboardMarkup):
+                    send_kwargs["reply_markup"] = markup
+                await context.bot.send_message(**send_kwargs)
                 if await mark_breaking_alert_sent(chat_id, article_key, url, title):
                     sent_count += 1
-                    per_user_sent[chat_id] = per_user_sent.get(chat_id, 0) + 1
+                    per_user_sent[chat_id] = next_count
                     await increment(BREAKING_ALERTS_SENT)
             except Exception as exc:
                 logger.exception(
@@ -288,6 +316,7 @@ async def _send_combo(
                             chat_id=chat_id,
                             text=result.empty_message,
                             parse_mode=ParseMode.HTML,
+                            reply_markup=result.reply_markup,
                         )
                         continue
 
@@ -300,6 +329,7 @@ async def _send_combo(
                             text=result.digest,
                             parse_mode=ParseMode.HTML,
                             disable_web_page_preview=True,
+                            reply_markup=result.reply_markup,
                         )
                         await increment(DAILY_MESSAGES_SENT)
                     else:
@@ -311,6 +341,13 @@ async def _send_combo(
                                 parse_mode=ParseMode.HTML,
                                 disable_web_page_preview=True,
                             )
+                        if result.reply_markup is not None:
+                            with contextlib.suppress(Exception):
+                                _ = await context.bot.send_message(
+                                    chat_id=chat_id,
+                                    text="📖 Open full articles:",
+                                    reply_markup=result.reply_markup,
+                                )
                         await increment(DAILY_MESSAGES_SENT)
 
                 except Exception as exc:

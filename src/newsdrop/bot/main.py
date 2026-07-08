@@ -70,6 +70,7 @@ async def _setup_commands(
         BotCommand("settimezone", "Set your timezone"),
         BotCommand("breaking", "Breaking news alerts"),
         BotCommand("prefs", "View preferences"),
+        BotCommand("clear", "Clear recent bot messages"),
         BotCommand("help", "Show all commands"),
     ]
     await application.bot.set_my_commands(commands)
