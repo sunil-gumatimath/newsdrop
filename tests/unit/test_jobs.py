@@ -305,15 +305,8 @@ async def test_send_breaking_news_sends_alerts(tmp_db):
     # 2 articles × 2 subscribers × 1 compact alert each = 4
     assert context.bot.send_message.call_count == 4
     # Single-message format includes match reason + open button path
-    first_text = context.bot.send_message.call_args_list[0].kwargs.get("text") or (
-        context.bot.send_message.call_args_list[0].args[0]
-        if context.bot.send_message.call_args_list[0].args
-        else ""
-    )
     # kwargs form: chat_id=..., text=...
-    sent_texts = [
-        (c.kwargs.get("text") or "") for c in context.bot.send_message.call_args_list
-    ]
+    sent_texts = [(c.kwargs.get("text") or "") for c in context.bot.send_message.call_args_list]
     assert any("Breaking" in t for t in sent_texts)
     assert any("Matched" in t for t in sent_texts)
 

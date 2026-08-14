@@ -86,8 +86,11 @@ def test_news_sends_digest_on_success(tmp_db):
 
     with (
         patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
-        patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False),
-        patch("newsdrop.bot.commands.rate_limit_record", new_callable=AsyncMock),
+        patch(
+            "newsdrop.bot.commands.rate_limit_try_acquire",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
         patch(
             "newsdrop.bot.commands.get_user_prefs",
             new_callable=AsyncMock,
@@ -149,8 +152,11 @@ def test_news_chunks_long_digest(tmp_db):
 
     with (
         patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
-        patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False),
-        patch("newsdrop.bot.commands.rate_limit_record", new_callable=AsyncMock),
+        patch(
+            "newsdrop.bot.commands.rate_limit_try_acquire",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
         patch(
             "newsdrop.bot.commands.get_user_prefs",
             new_callable=AsyncMock,
@@ -172,7 +178,11 @@ def test_news_chunks_long_digest(tmp_db):
 def test_news_blocks_on_cooldown(tmp_db):
     update, message, context = _make_update()
 
-    with patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=True):
+    with patch(
+        "newsdrop.bot.commands.rate_limit_try_acquire",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
         asyncio.run(commands.news(update, context))
 
     text = message.reply_text.call_args.args[0]
@@ -186,7 +196,11 @@ def test_news_handles_api_error(tmp_db):
 
     with (
         patch("newsdrop.bot.commands.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
-        patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=False),
+        patch(
+            "newsdrop.bot.commands.rate_limit_try_acquire",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
         patch(
             "newsdrop.bot.commands.get_user_prefs",
             new_callable=AsyncMock,
@@ -219,7 +233,11 @@ def test_search_requires_topic(tmp_db):
 
 def test_search_blocks_on_cooldown(tmp_db):
     update, message, context = _make_update(args=["bitcoin"])
-    with patch("newsdrop.bot.commands.rate_limit_check", new_callable=AsyncMock, return_value=True):
+    with patch(
+        "newsdrop.bot.commands.rate_limit_try_acquire",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
         asyncio.run(commands.search(update, context))
 
     text = message.reply_text.call_args.args[0]

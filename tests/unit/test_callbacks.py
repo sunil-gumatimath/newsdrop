@@ -203,7 +203,9 @@ async def test_button_handler_search_action(tmp_db):
 
     with (
         patch(
-            "newsdrop.bot.callbacks.rate_limit_check", new_callable=AsyncMock, return_value=False
+            "newsdrop.bot.callbacks.rate_limit_try_acquire",
+            new_callable=AsyncMock,
+            return_value=True,
         ),
         patch(
             "newsdrop.bot.callbacks.get_user_prefs",
@@ -212,14 +214,11 @@ async def test_button_handler_search_action(tmp_db):
         ),
         patch("newsdrop.bot.callbacks.search_news", new_callable=AsyncMock) as mock_search,
         patch("newsdrop.bot.callbacks.build_search_payload") as mock_payload,
-        patch("newsdrop.bot.callbacks.rate_limit_record", new_callable=AsyncMock),
     ):
         from newsdrop.bot.helpers import DigestResult
 
         mock_search.return_value = {"articles": [], "totalResults": 0}
-        mock_payload.return_value = DigestResult(
-            "Results for bitcoin", None, None
-        )
+        mock_payload.return_value = DigestResult("Results for bitcoin", None, None)
         await callbacks.button_handler(update, context)
 
     mock_search.assert_awaited_once()
@@ -232,7 +231,11 @@ async def test_button_handler_search_rate_limited(tmp_db):
     context = MagicMock()
 
     with (
-        patch("newsdrop.bot.callbacks.rate_limit_check", new_callable=AsyncMock, return_value=True),
+        patch(
+            "newsdrop.bot.callbacks.rate_limit_try_acquire",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
         patch("newsdrop.bot.callbacks.search_news", new_callable=AsyncMock) as mock_search,
     ):
         await callbacks.button_handler(update, context)
