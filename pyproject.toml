@@ -27,6 +27,7 @@ dependencies = [
     "feedparser>=6.0.12",
     "python-dotenv>=1.2.2",
     "redis>=5.0,<6",
+    "apscheduler>=3.10,<4",
 ]
 [project.scripts]
 newsdrop = "newsdrop.bot:main"
