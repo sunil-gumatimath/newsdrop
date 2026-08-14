@@ -76,3 +76,21 @@ async def test_schedule_and_breaking_keyword_prefs(tmp_db):
     prefs = await database.get_user_prefs(chat_id)
     assert prefs["quiet_start_hour"] == ""
     assert prefs["quiet_end_hour"] == ""
+
+
+async def test_default_country_honored_for_new_user(tmp_db):
+    """Regression: a new user's stored country must honor DEFAULT_COUNTRY.
+
+    _set_user_prefs_sync previously fell back to the hardcoded "us" default
+    instead of the configured default_country, so e.g. DEFAULT_COUNTRY=in
+    would silently store "us".
+    """
+    chat_id = 4242
+    prefs = await database.set_user_prefs(
+        chat_id, timezone="Asia/Kolkata", default_country="in"
+    )
+    assert prefs["country"] == "in"
+
+    reread = await database.get_user_prefs(chat_id, default_country="in")
+    assert reread["country"] == "in"
+    await database.remove_subscriber(chat_id)

@@ -68,3 +68,31 @@ async def test_backend_reset_clears_state():
     count, _ = await api_request_count(limit=10)
     assert count == 0
     assert await rate_limit_check("scope", 1, cooldown_seconds=300) is False
+
+
+async def test_try_acquire_rate_limit_does_not_deadlock():
+    """Regression: _MemoryBackend.try_acquire_rate_limit must not self-deadlock.
+
+    The non-reentrant asyncio.Lock must be acquired exactly once and the
+    check+record inlined, otherwise the task blocks on its own lock forever.
+    """
+    from newsdrop.state import _MemoryBackend
+
+    backend = _MemoryBackend()
+    # First acquire succeeds.
+    assert await asyncio.wait_for(
+        backend.try_acquire_rate_limit("news", 123, 10), timeout=3
+    ) is True
+    # Still within cooldown -> refused, but returns (does not hang).
+    assert await asyncio.wait_for(
+        backend.try_acquire_rate_limit("news", 123, 10), timeout=3
+    ) is False
+
+
+async def test_try_acquire_rate_limit_distinct_scopes():
+    from newsdrop.state import _MemoryBackend
+
+    backend = _MemoryBackend()
+    assert await backend.try_acquire_rate_limit("news", 1, 10) is True
+    # Different scope for the same chat must still be allowed.
+    assert await backend.try_acquire_rate_limit("search", 1, 10) is True
