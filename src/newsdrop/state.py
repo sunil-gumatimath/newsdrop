@@ -28,6 +28,18 @@ except ImportError:  # pragma: no cover
     Redis = None  # type: ignore[misc, assignment]
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    """Convert value to int, returning ``default`` on failure."""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 class StateBackend(ABC):
     """Abstract backend for shared state."""
 
@@ -58,6 +70,18 @@ class StateBackend(ABC):
     @abstractmethod
     async def record_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> None:
         """Mark ``chat_id`` as rate-limited in ``scope`` for ``cooldown_seconds``."""
+
+    @abstractmethod
+    async def try_acquire_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
+        """Atomically check AND record a rate-limit.
+
+        Returns ``True`` if the caller is allowed (was not rate-limited and
+        has been marked). ``False`` if the user is still on cooldown.
+
+        Combines ``is_rate_limited`` + ``record_rate_limit`` into one
+        atomic call so there is no TOCTOU race between the check and
+        the record.
+        """
 
     @abstractmethod
     async def metric_increment(self, name: str, value: int = 1) -> None:
@@ -146,9 +170,42 @@ class _MemoryBackend(StateBackend):
             loop = asyncio.get_running_loop()
             return (loop.time() - last_call) < cooldown_seconds
 
-    async def record_rate_limit(self, scope: str, chat_id: int, _cooldown_seconds: int) -> None:
+    async def record_rate_limit(
+        self,
+        scope: str,
+        chat_id: int,
+        _cooldown_seconds: int,
+    ) -> None:
         async with self._lock:
             self._rate_limits[self._key(scope, str(chat_id))] = asyncio.get_running_loop().time()
+
+    async def try_acquire_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
+        """Atomically check + record under the same lock — no TOCTOU race.
+
+        The check and the record must happen while holding ``self._lock``
+        (a non-reentrant ``asyncio.Lock``). The earlier implementation
+        re-entered ``self.is_rate_limited`` / ``self.record_rate_limit``
+        which each acquire the same lock, deadlocking the calling task.
+        We inline the logic here so the lock is acquired exactly once.
+        """
+        async with self._lock:
+            # Periodic cleanup of expired entries (amortized on each call).
+            if len(self._rate_limits) > 5000:
+                now = asyncio.get_running_loop().time()
+                expired = [
+                    k for k, ts in self._rate_limits.items() if (now - ts) >= cooldown_seconds
+                ]
+                for k in expired:
+                    del self._rate_limits[k]
+                if expired:
+                    logger.info("Rate-limit cleanup: removed %d expired entries", len(expired))
+            last_call = self._rate_limits.get(self._key(scope, str(chat_id)), 0.0)
+            now = asyncio.get_running_loop().time()
+            if (now - last_call) < cooldown_seconds:
+                # Still on cooldown — not acquired.
+                return False
+            self._rate_limits[self._key(scope, str(chat_id))] = now
+            return True
 
     async def metric_increment(self, name: str, value: int = 1) -> None:
         async with self._lock:
@@ -177,7 +234,11 @@ class _RedisBackend(StateBackend):
         return date.today().isoformat()
 
     async def get_cache(self, key: str) -> StateValue | None:
-        raw = await self._redis.get(self._key("cache", key))
+        try:
+            raw = await self._redis.get(self._key("cache", key))
+        except Exception:
+            logger.exception("Redis get_cache error")
+            return None
         if raw is None:
             return None
         try:
@@ -187,46 +248,94 @@ class _RedisBackend(StateBackend):
             return None
 
     async def set_cache(self, key: str, value: StateValue, ttl_seconds: int) -> None:
-        await self._redis.setex(
-            self._key("cache", key),
-            ttl_seconds,
-            json.dumps(value, default=str),
-        )
+        try:
+            await self._redis.setex(
+                self._key("cache", key),
+                ttl_seconds,
+                json.dumps(value, default=str),
+            )
+        except Exception:
+            logger.exception("Redis set_cache error")
 
     async def check_api_budget(self, limit: int) -> bool:
-        count = int(await self._redis.get(self._key("daily_requests", self._today())) or 0)
+        try:
+            count = _safe_int(await self._redis.get(self._key("daily_requests", self._today())))
+        except Exception:
+            logger.exception("Redis check_api_budget error")
+            return True  # allow on error rather than blocking
         return count < limit
 
     async def consume_api_request(self, limit: int) -> bool:
-        key = self._key("daily_requests", self._today())
-        pipe = self._redis.pipeline()
-        pipe.incr(key)
-        pipe.expire(key, 172800)  # 2 days
-        results = await pipe.execute()
-        count = int(results[0])
-        return count <= limit
+        try:
+            key = self._key("daily_requests", self._today())
+            pipe = self._redis.pipeline()
+            pipe.incr(key)
+            pipe.expire(key, 172800)  # 2 days
+            results = await pipe.execute()
+            count = _safe_int(results[0])
+            return count <= limit
+        except Exception:
+            logger.exception("Redis consume_api_request error")
+            return True  # allow on error rather than blocking
 
     async def get_api_request_count(self, limit: int) -> tuple[int, int]:
-        count = int(await self._redis.get(self._key("daily_requests", self._today())) or 0)
+        try:
+            count = _safe_int(await self._redis.get(self._key("daily_requests", self._today())))
+        except Exception:
+            logger.exception("Redis get_api_request_count error")
+            count = 0
         return count, limit
 
     async def is_rate_limited(self, scope: str, chat_id: int, _cooldown_seconds: int) -> bool:
-        exists = await self._redis.exists(self._key("rate_limit", scope, str(chat_id)))
-        return bool(exists)
+        try:
+            exists = await self._redis.exists(self._key("rate_limit", scope, str(chat_id)))
+            return bool(exists)
+        except Exception:
+            logger.exception("Redis is_rate_limited error")
+            return False  # allow on error
 
     async def record_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> None:
-        await self._redis.setex(
-            self._key("rate_limit", scope, str(chat_id)),
-            cooldown_seconds,
-            "1",
-        )
+        try:
+            await self._redis.setex(
+                self._key("rate_limit", scope, str(chat_id)),
+                cooldown_seconds,
+                "1",
+            )
+        except Exception:
+            logger.exception("Redis record_rate_limit error")
+
+    async def try_acquire_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
+        """Atomically check + record using Redis ``setnx`` with expiry.
+
+        Uses ``SET key value NX EX cooldown_seconds`` which only sets the
+        key if it does **not** already exist — this is the atomic equivalent
+        of check-then-set.
+        """
+        try:
+            result = await self._redis.set(
+                self._key("rate_limit", scope, str(chat_id)),
+                "1",
+                nx=True,
+                ex=cooldown_seconds,
+            )
+            return result is not None
+        except Exception:
+            logger.exception("Redis try_acquire_rate_limit error")
+            return True  # allow on error
 
     async def metric_increment(self, name: str, value: int = 1) -> None:
-        await self._redis.incrby(self._key("metric", name), max(value, 0))
+        try:
+            await self._redis.incrby(self._key("metric", name), max(value, 0))
+        except Exception:
+            logger.exception("Redis metric_increment error")
 
     async def metric_get(self, name: str) -> int:
-        raw = await self._redis.get(self._key("metric", name))
-        return int(raw) if raw is not None else 0
+        try:
+            raw = await self._redis.get(self._key("metric", name))
+            return _safe_int(raw)
+        except Exception:
+            logger.exception("Redis metric_get error")
+            return 0
 
 
 _backend: StateBackend | None = None
@@ -280,14 +389,14 @@ class WindowedCounter:
         self._lock = asyncio.Lock()
 
     async def increment(self, value: int = 1) -> None:
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         async with self._lock:
             for _ in range(value):
                 self._events.append(now)
             self._trim(now)
 
     async def count_window(self, window_seconds: int) -> int:
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         cutoff = now - window_seconds
         async with self._lock:
             self._trim(now)
@@ -327,6 +436,15 @@ async def rate_limit_check(scope: str, chat_id: int, cooldown_seconds: int) -> b
 
 async def rate_limit_record(scope: str, chat_id: int, cooldown_seconds: int) -> None:
     await get_backend().record_rate_limit(scope, chat_id, cooldown_seconds)
+
+
+async def rate_limit_try_acquire(scope: str, chat_id: int, cooldown_seconds: int) -> bool:
+    """Atomically check and record a rate-limit.
+
+    Preferred over separate ``rate_limit_check`` + ``rate_limit_record``
+    calls to avoid TOCTOU race conditions.
+    """
+    return await get_backend().try_acquire_rate_limit(scope, chat_id, cooldown_seconds)
 
 
 async def metric_increment(name: str, value: int = 1) -> None:
