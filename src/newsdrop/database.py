@@ -18,6 +18,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from .config import DEFAULT_COUNTRY
+
 
 def _resolve_db_path() -> Path:
     """Return the configured SQLite database path.
@@ -40,7 +42,13 @@ MAX_FOLLOWED_TOPICS_PER_USER = 10
 
 
 def _get_connection() -> sqlite3.Connection:
-    """Return a SQLite connection configured for concurrent access."""
+    """Open a fresh SQLite connection for the current DB operation.
+
+    A new connection is created per call. This is simple and correct: every
+    ``_*_sync`` helper closes its connection in a ``finally`` block, so no
+    connection is ever reused across operations (and thus ``conn.total_changes``
+    in ``_add_subscriber_sync`` reflects only the current statement).
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -62,6 +70,10 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 
 def _get_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    # Validate table_name is a bare SQL identifier (prevents injection even
+    # though callers only pass internal constants).
+    if not table_name or not table_name.replace("_", "").isalnum():
+        raise ValueError(f"Invalid table name: {table_name!r}")
     rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     return {row["name"] for row in rows}
 
@@ -153,9 +165,7 @@ def _migrate_user_preferences(conn: sqlite3.Connection) -> None:
         )
 
     if "timezone" not in columns:
-        conn.execute(
-            "ALTER TABLE user_preferences ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'"
-        )
+        conn.execute("ALTER TABLE user_preferences ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'")
 
     if "daily_hour" not in columns:
         conn.execute(
@@ -238,14 +248,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 def _init_db() -> None:
     """Initialize database and apply schema migrations."""
+
     with _lock:
         conn = _get_connection()
-        try:
-            _create_schema(conn)
-            _migrate_schema(conn)
-            conn.commit()
-        finally:
-            conn.close()
+        _create_schema(conn)
+        _migrate_schema(conn)
+        conn.commit()
+        conn.close()
+
+
+def _close_cached_connections() -> None:
+    """No-op retained for test/conftest compatibility.
+
+    Connections are created per-operation and closed by each ``_*_sync``
+    helper, so there is no shared connection to close between tests.
+    """
 
 
 def _normalize_topic(topic: str) -> str:
@@ -337,6 +354,16 @@ async def is_subscriber(chat_id: int) -> bool:
 # ── User Preferences ─────────────────────────────────────────────────
 
 
+def _safe_str_to_int(value: object, default: int = 0) -> int:
+    """Convert a DB value to int, returning ``default`` on failure."""
+    if value is None:
+        return default
+    try:
+        return int(str(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _default_prefs(default_country: str = "us") -> dict[str, str]:
     return {
         "country": default_country,
@@ -351,18 +378,18 @@ def _default_prefs(default_country: str = "us") -> dict[str, str]:
 
 
 def _row_to_prefs(row: sqlite3.Row, default_country: str = "us") -> dict[str, str]:
-    quiet_start = row["quiet_start_hour"] if "quiet_start_hour" in row.keys() else None
-    quiet_end = row["quiet_end_hour"] if "quiet_end_hour" in row.keys() else None
+    quiet_start = row["quiet_start_hour"]
+    quiet_end = row["quiet_end_hour"]
     return {
         "country": str(row["country"] if row["country"] is not None else default_country),
         "category": str(row["category"] if row["category"] is not None else "general"),
         "timezone": str(row["timezone"] if row["timezone"] else "UTC"),
-        "daily_hour": str(int(row["daily_hour"]) if row["daily_hour"] is not None else 8),
-        "quiet_start_hour": "" if quiet_start is None else str(int(quiet_start)),
-        "quiet_end_hour": "" if quiet_end is None else str(int(quiet_end)),
+        "daily_hour": str(_safe_str_to_int(row["daily_hour"], 8)),
+        "quiet_start_hour": "" if quiet_start is None else str(_safe_str_to_int(quiet_start)),
+        "quiet_end_hour": "" if quiet_end is None else str(_safe_str_to_int(quiet_end)),
         "breaking_keywords": str(row["breaking_keywords"] or ""),
         "breaking_use_follows": "1"
-        if int(row["breaking_use_follows"] if row["breaking_use_follows"] is not None else 1)
+        if _safe_str_to_int(row["breaking_use_follows"], 1) != 0
         else "0",
     }
 
@@ -404,6 +431,7 @@ def _set_user_prefs_sync(
     clear_quiet_hours: bool = False,
     breaking_keywords: str | None = None,
     breaking_use_follows: bool | None = None,
+    default_country: str = DEFAULT_COUNTRY,
 ) -> dict[str, str]:
     """Upsert user preferences. Only provided fields are updated."""
     with _lock:
@@ -421,10 +449,7 @@ def _set_user_prefs_sync(
             )
             row = cursor.fetchone()
 
-            if row:
-                current = _row_to_prefs(row)
-            else:
-                current = _default_prefs()
+            current = _row_to_prefs(row) if row else _default_prefs(default_country)
 
             if country is not None:
                 current["country"] = country
@@ -507,6 +532,7 @@ async def set_user_prefs(
     clear_quiet_hours: bool = False,
     breaking_keywords: str | None = None,
     breaking_use_follows: bool | None = None,
+    default_country: str = DEFAULT_COUNTRY,
 ) -> dict[str, str]:
     return await asyncio.to_thread(
         _set_user_prefs_sync,
@@ -520,6 +546,7 @@ async def set_user_prefs(
         clear_quiet_hours,
         breaking_keywords,
         breaking_use_follows,
+        default_country,
     )
 
 
