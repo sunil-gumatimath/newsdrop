@@ -9,9 +9,7 @@ from telegram.ext import ContextTypes
 from ..config import (
     BREAKING_ALERT_INTERVAL_MINUTES,
     BREAKING_ALERT_MAX_PER_DAY,
-    CATEGORIES,
     COMMON_TIMEZONES,
-    COUNTRIES,
     DAILY_HOUR_CHOICES,
     DEFAULT_COUNTRY,
     DEFAULT_DAILY_HOUR,
@@ -56,8 +54,7 @@ from ..news_fetcher import (
     search_news,
 )
 from ..state import (
-    rate_limit_check,
-    rate_limit_record,
+    rate_limit_try_acquire,
 )
 from .helpers import (
     NEWS_COOLDOWN_SECONDS,
@@ -125,9 +122,8 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     await increment(COMMAND_TOTAL)
     await increment(COMMAND_NEWS)
 
-    # Per-user cooldown — same pattern as /search, but with a longer
-    # window since /news fetches a full digest (higher API cost).
-    if await rate_limit_check(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS):
+    # Per-user cooldown — atomic check+record to avoid TOCTOU race.
+    if not await rate_limit_try_acquire(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS):
         unit = "second" if NEWS_COOLDOWN_SECONDS == 1 else "seconds"
         _ = await message.reply_text(
             f"⏳ You're on a cooldown. Try again in {NEWS_COOLDOWN_SECONDS} {unit}. "
@@ -181,9 +177,6 @@ async def news(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
                         reply_markup=result.reply_markup,
                     )
 
-        # Record the successful call for cooldown tracking.
-        await rate_limit_record(NEWS_RATE_LIMIT_SCOPE, chat_id, NEWS_COOLDOWN_SECONDS)
-
     except APIClientError:
         await increment(NEWS_API_ERRORS)
         logger.exception("Failed to fetch news")
@@ -206,7 +199,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _ = await message.reply_text("Usage: /search <topic>\nExample: /search bitcoin")
         return
 
-    if await rate_limit_check(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
+    if not await rate_limit_try_acquire(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
         unit = "second" if SEARCH_COOLDOWN_SECONDS == 1 else "seconds"
         _ = await message.reply_text(
             f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS} {unit} before searching again."
@@ -237,7 +230,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode=ParseMode.HTML,
                 reply_markup=result.reply_markup,
             )
-            await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
             return
 
         if result.digest is None:
@@ -265,7 +257,6 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         "📖 Open results / follow topic:",
                         reply_markup=result.reply_markup,
                     )
-        await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
     except APIClientError:
         await increment(NEWS_API_ERRORS)
         logger.exception("Failed to search news")
@@ -784,14 +775,14 @@ async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     raw_category = args[0] if args else ""
     raw_country = args[1] if len(args) >= 2 else None
 
-    if await rate_limit_check(TRENDING_RATE_LIMIT_SCOPE, chat_id, TRENDING_COOLDOWN_SECONDS):
+    if not await rate_limit_try_acquire(
+        TRENDING_RATE_LIMIT_SCOPE, chat_id, TRENDING_COOLDOWN_SECONDS
+    ):
         unit = "second" if TRENDING_COOLDOWN_SECONDS == 1 else "seconds"
         _ = await message.reply_text(
             f"⏳ Trending is on cooldown. Try again in {TRENDING_COOLDOWN_SECONDS} {unit}."
         )
         return
-
-    await rate_limit_record(TRENDING_RATE_LIMIT_SCOPE, chat_id, TRENDING_COOLDOWN_SECONDS)
 
     # Resolve country: explicit override > saved DB preference > DEFAULT_COUNTRY
     prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
