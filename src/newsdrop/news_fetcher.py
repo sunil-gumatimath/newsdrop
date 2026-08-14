@@ -21,13 +21,10 @@ import httpx
 from .config import (
     CATEGORY_KEYWORDS,
     DAILY_REQUEST_LIMIT,
-    ENABLE_REDDIT,
     ENABLE_RSS,
     GLOBAL_COUNTRY_CODES,
     NEWS_API_KEY,
 )
-from .cross_verify import apply_cross_verification
-from .reddit_feeds import fetch_reddit_posts, has_reddit_for
 from .rss_feeds import (
     fetch_rss_articles,
     fetch_rss_category_articles,
@@ -144,16 +141,6 @@ def _safe_url(url: object) -> str:
         return ""
 
     return candidate
-
-
-def _format_linked_title(index: int, title: str, url: str) -> str:
-    safe_title = _escape_text(title or "No title")
-    safe_url = _safe_url(url)
-
-    if safe_url:
-        escaped_url = html.escape(safe_url, quote=True)
-        return f'<b>{index}. <a href="{escaped_url}">{safe_title}</a></b>'
-    return f"<b>{index}. {safe_title}</b>"
 
 
 def _truncate_text(text: str, max_length: int) -> str:
@@ -300,8 +287,7 @@ async def _fetch_news(params: Params) -> NewsResponse:
 
             if not isinstance(data, dict):
                 raise RuntimeError(
-                    "News service returned unexpected response shape "
-                    f"(HTTP {response.status_code})"
+                    f"News service returned unexpected response shape (HTTP {response.status_code})"
                 )
 
             if response.status_code != 200 or str(data.get("status", "")).lower() == "error":
@@ -347,16 +333,6 @@ def _merge_and_dedupe(*sources: list[Article], limit: int = 10) -> list[Article]
     return rank_and_cluster(*sources, limit=limit)
 
 
-async def _safe_fetch_reddit(country: str, category: str, limit_per_sub: int = 25) -> list[Article]:
-    if not ENABLE_REDDIT or not has_reddit_for(country, category):
-        return []
-    try:
-        return await fetch_reddit_posts(country, category, limit_per_sub=limit_per_sub)
-    except Exception as exc:
-        logger.warning("Reddit fetch failed for %s/%s: %s", country, category, exc)
-        return []
-
-
 async def _safe_fetch_rss(
     country: str,
     limit: int = 20,
@@ -367,19 +343,37 @@ async def _safe_fetch_rss(
     Category-specific feeds are returned as-is (already on-topic). Country
     general feeds are keyword-filtered only when the requested category is
     not general and we had to fall back to them.
+
+    Combined results are capped to ``limit`` (not ``2*limit``) and deduplicated
+    by URL so feeds shared between country and category lists are not fetched
+    twice.
     """
     if not ENABLE_RSS or not has_rss_for(country, category):
         return []
     try:
         cat = (category or "general").strip().lower()
         if cat and cat != "general" and has_rss_category(cat):
+            # Split the limit evenly between category-specific and country feeds
+            # so the combined result is capped at ``limit`` (not ``2*limit``).
+            half_limit = max(1, limit // 2)
             category_articles, country_articles = await asyncio.gather(
-                fetch_rss_category_articles(cat, limit=limit),
-                fetch_rss_articles(country, limit=limit, category="general"),
+                fetch_rss_category_articles(cat, limit=half_limit),
+                fetch_rss_articles(country, limit=half_limit, category="general"),
             )
             # Country general feeds need keyword filter; category feeds do not.
             country_articles = _filter_by_category(country_articles, cat)
-            return category_articles + country_articles
+            merged: list[Article] = category_articles + country_articles
+            # Deduplicate by URL (a feed may appear in both lists).
+            seen_urls: set[str] = set()
+            deduped: list[Article] = []
+            for a in merged:
+                url = str(a.get("url", "") or "").strip()
+                if url and url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
+                deduped.append(a)
+            return deduped[:limit]
 
         articles = await fetch_rss_articles(country, limit=limit, category=cat)
         if cat and cat != "general":
@@ -388,6 +382,7 @@ async def _safe_fetch_rss(
     except Exception as exc:
         logger.warning("RSS fetch failed for %s/%s: %s", country, category, exc)
         return []
+
 
 def _query_terms(query: str) -> list[str]:
     """Tokenize a search query into matchable terms."""
@@ -478,12 +473,18 @@ def _filter_by_category(articles: list[Article], category: str) -> list[Article]
     keywords = CATEGORY_KEYWORDS[category]
     min_matches = 1 if category == "sports" else 2
 
+    # Whole-word matching so short keywords don't match inside other words
+    # (e.g. "win" must not match "winter"/"window", "ai" must not match
+    # "against", "race" must not match "brace"). Mirrors the whole-word
+    # semantics used by the search and breaking-alert paths.
+    patterns = [_term_pattern(kw) for kw in keywords]
+
     filtered: list[Article] = []
     for article in articles:
         title = str(article.get("title", "")).lower()
         description = str(article.get("description", "")).lower()
         blob = f"{title} {description}"
-        match_count = sum(1 for keyword in keywords if keyword in blob)
+        match_count = sum(1 for pat in patterns if pat.search(blob))
 
         if match_count >= min_matches:
             filtered.append(article)
@@ -516,17 +517,15 @@ async def fetch_top_headlines(
     if mapped_category and mapped_category != "top":
         params["category"] = mapped_category
 
-    api_result, rss_result, reddit_result = await asyncio.gather(
+    api_result, rss_result = await asyncio.gather(
         _fetch_news(params),
         _safe_fetch_rss(country, limit=20, category=category),
-        _safe_fetch_reddit(country, category),
         return_exceptions=True,
     )
 
     api_data: NewsResponse | None = None
     api_error: Exception | None = None
     rss_articles: list[Article] = []
-    reddit_posts: list[Article] = []
 
     if isinstance(api_result, Exception):
         api_error = api_result
@@ -539,31 +538,19 @@ async def fetch_top_headlines(
     elif isinstance(rss_result, list):
         rss_articles = rss_result
 
-    if isinstance(reddit_result, Exception):
-        logger.warning("Reddit fetch failed for %s/%s: %s", country, category, reddit_result)
-    elif isinstance(reddit_result, list):
-        reddit_posts = reddit_result
-
     api_articles = (api_data or {}).get("articles", [])
     api_articles = api_articles if isinstance(api_articles, list) else []
 
     if not api_articles and not rss_articles and api_error is not None:
         raise api_error
 
-    # Cluster + rank first; Reddit popularity re-orders within the ranked set.
     merged = _merge_and_dedupe(api_articles, rss_articles, limit=10)
-    if reddit_posts:
-        merged = apply_cross_verification(merged, reddit_posts)
-        # Re-rank so multi-source + Reddit signals both influence order.
-        merged = rank_and_cluster(merged, limit=10)
 
     sources_used: list[str] = []
     if api_articles:
         sources_used.append("newsdata.io")
     if rss_articles:
         sources_used.append("rss")
-    if reddit_posts:
-        sources_used.append("reddit")
 
     return {
         "status": "ok",
@@ -613,52 +600,6 @@ async def search_news(query: str, country: str = "us") -> NewsResponse:
         "articles": merged,
         "query": q,
     }
-
-
-def format_search_results(data: NewsResponse, query: str) -> str:
-    """Legacy text formatter (tests / fallback). Prefer ``build_search_payload``."""
-    raw_articles = data.get("articles", [])
-    articles: list[Article] = raw_articles if isinstance(raw_articles, list) else []
-
-    if not articles:
-        return (
-            f'🔍 No results found for "{_escape_text(query)}". '
-            "Try a different search term."
-        )
-
-    message = f'🔍 <b>Search: "{_escape_text(query)}"</b>\n\n'
-
-    for i, article in enumerate(articles[:8], 1):
-        source_obj = article.get("source", {})
-        source = (
-            _escape_text(source_obj.get("name", "Unknown"))
-            if isinstance(source_obj, dict)
-            else "Unknown"
-        )
-        title = str(article.get("title", "No title"))
-        url = str(article.get("url", ""))
-        raw_summary = str(
-            article.get("description", "") or article.get("content", "") or ""
-        ).strip()
-        raw_summary = re.sub(r"\[\s*\+?\d+\s*chars?\s*\]", "", raw_summary, flags=re.IGNORECASE)
-        raw_summary = re.sub(r"\s+", " ", raw_summary).strip()
-        summary = _truncate_text(raw_summary, 140)
-
-        message += f"{_format_linked_title(i, title, url)}\n"
-        if summary:
-            message += f"<i>{_escape_text(summary)}</i>\n"
-        message += f"📍 {source}\n\n"
-
-    total_results = data.get("totalResults", 0)
-    message += f"Found {total_results} results. Showing top {min(8, len(articles))}."
-    return message
-
-
-def get_article_image(article: Article) -> str | None:
-    url = _safe_url(article.get("urlToImage", ""))
-    if url and not url.endswith("null"):
-        return url
-    return None
 
 
 async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list[Article]:
@@ -938,7 +879,9 @@ async def fetch_trending_topics(countries: list[str], category: str = "general")
     semaphore = asyncio.Semaphore(3)
     tasks = [
         asyncio.create_task(
-            _fetch_trending_for_country(country, mapped_category, category, keyword_counts, semaphore)
+            _fetch_trending_for_country(
+                country, mapped_category, category, keyword_counts, semaphore
+            )
         )
         for country in countries
     ]

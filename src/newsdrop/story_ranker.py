@@ -4,6 +4,9 @@ Turns a multi-source article pile into a short, high-signal list:
 1. Cluster near-duplicate stories (same URL or similar titles)
 2. Pick the best representative per cluster (trusted source + recency)
 3. Rank clusters by corroboration, source quality, and freshness
+
+Title-similarity and URL-canonicalisation logic is imported from
+:mod:`newsdrop.story_utils`.
 """
 
 from __future__ import annotations
@@ -11,8 +14,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from .config import WORD_RE
-from .cross_verify import canonical_url
+from .story_utils import (
+    same_story,
+    source_name,
+    titles_are_similar,
+)
+
+# Re-exported for backward compatibility with callers/tests that import from
+# ``newsdrop.story_ranker``.
+__all__ = ["same_story", "source_name", "titles_are_similar"]
 
 Article = dict[str, Any]
 
@@ -63,12 +73,11 @@ _MIN_TITLE_CHARS = 20
 _W_TRUST = 3.0
 _W_CLUSTER = 1.5  # corroboration across outlets
 _W_RECENCY = 2.0  # 0..1 freshness score
-_W_REDDIT = 1.25
 
 
-def source_trust(source_name: str) -> float:
+def source_trust(source_name_str: str) -> float:
     """Return a trust score in ``[0, 1]`` for a source display name."""
-    name = (source_name or "").strip().lower()
+    name = (source_name_str or "").strip().lower()
     if not name:
         return _DEFAULT_TRUST
 
@@ -77,43 +86,6 @@ def source_trust(source_name: str) -> float:
         if key in name:
             best = max(best, weight)
     return best
-
-
-def _source_name(article: Article) -> str:
-    source_obj = article.get("source", {})
-    if isinstance(source_obj, dict):
-        return str(source_obj.get("name", "") or "")
-    return str(source_obj or "")
-
-
-def _normalize_title(title: str) -> str:
-    if not title:
-        return ""
-    return " ".join(WORD_RE.findall(title.lower()))
-
-
-def _title_similarity(left: str, right: str) -> float:
-    left_words = set(_normalize_title(left).split())
-    right_words = set(_normalize_title(right).split())
-    if not left_words or not right_words:
-        return 0.0
-    return len(left_words & right_words) / len(left_words | right_words)
-
-
-def titles_are_similar(left: str, right: str) -> bool:
-    """True when two headlines likely describe the same story."""
-    left_norm = _normalize_title(left)
-    right_norm = _normalize_title(right)
-    if not left_norm or not right_norm:
-        return False
-    if left_norm == right_norm:
-        return True
-    if len(left_norm) < _MIN_TITLE_CHARS and len(right_norm) < _MIN_TITLE_CHARS:
-        return left_norm == right_norm
-    if len(left_norm) >= _MIN_TITLE_CHARS and len(right_norm) >= _MIN_TITLE_CHARS:
-        if left_norm in right_norm or right_norm in left_norm:
-            return True
-    return _title_similarity(left, right) >= _TITLE_SIMILARITY_THRESHOLD
 
 
 def _parse_published(value: object) -> datetime | None:
@@ -141,21 +113,13 @@ def _recency_score(article: Article, now: datetime | None = None) -> float:
     return max(0.0, 1.0 - (age_hours / 72.0))
 
 
-def _same_story(left: Article, right: Article) -> bool:
-    left_url = canonical_url(str(left.get("url", "") or ""))
-    right_url = canonical_url(str(right.get("url", "") or ""))
-    if left_url and right_url and left_url == right_url:
-        return True
-    return titles_are_similar(str(left.get("title", "")), str(right.get("title", "")))
-
-
 def cluster_articles(articles: list[Article]) -> list[list[Article]]:
     """Greedy cluster of near-duplicate articles (order-preserving)."""
     clusters: list[list[Article]] = []
     for article in articles:
         placed = False
         for cluster in clusters:
-            if _same_story(cluster[0], article):
+            if same_story(cluster[0], article):
                 cluster.append(article)
                 placed = True
                 break
@@ -176,7 +140,7 @@ def _has_usable_blurb(article: Article) -> float:
 def _article_rank_key(
     article: Article, now: datetime | None = None
 ) -> tuple[float, float, float, str]:
-    trust = source_trust(_source_name(article))
+    trust = source_trust(source_name(article))
     recency = _recency_score(article, now=now)
     blurb = _has_usable_blurb(article)
     published = str(article.get("publishedAt", "") or "")
@@ -196,7 +160,7 @@ def pick_representative(cluster: list[Article], now: datetime | None = None) -> 
     names: list[str] = []
     seen: set[str] = set()
     for article in ranked:
-        name = _source_name(article).strip()
+        name = source_name(article).strip()
         if not name:
             continue
         key = name.lower()
@@ -205,32 +169,30 @@ def pick_representative(cluster: list[Article], now: datetime | None = None) -> 
         seen.add(key)
         names.append(name)
 
-    primary = _source_name(rep).strip()
+    primary = source_name(rep).strip()
     related = [n for n in names if n.lower() != primary.lower()]
     rep["clusterSize"] = len(cluster)
     rep["relatedSources"] = related[:5]
     return rep
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def _cluster_score(rep: Article, now: datetime | None = None) -> float:
-    trust = source_trust(_source_name(rep))
-    cluster_size = int(rep.get("clusterSize", 1) or 1)
+    trust = source_trust(source_name(rep))
+    cluster_size = _safe_int(rep.get("clusterSize"), 1)
     # Diminishing returns after ~4 outlets.
     cluster_signal = min(cluster_size - 1, 3) / 3.0
     recency = _recency_score(rep, now=now)
-    reddit = 1.0 if rep.get("redditTrending") or rep.get("crossConfirmed") else 0.0
-    try:
-        reddit_score = int(rep.get("redditScore", 0) or 0)
-    except (TypeError, ValueError):
-        reddit_score = 0
-    reddit_boost = reddit + min(reddit_score, 1000) / 2000.0
 
-    return (
-        _W_TRUST * trust
-        + _W_CLUSTER * cluster_signal
-        + _W_RECENCY * recency
-        + _W_REDDIT * reddit_boost
-    )
+    return _W_TRUST * trust + _W_CLUSTER * cluster_signal + _W_RECENCY * recency
 
 
 def rank_and_cluster(
