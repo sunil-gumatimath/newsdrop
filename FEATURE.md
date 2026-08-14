@@ -34,7 +34,7 @@ Bot menu (Telegram command list) includes: start, news, subscribe, search, follo
 
 ### Digests (`/news` + daily job)
 - Multi-source cards: linked title, short blurb, relative time, source, multi-outlet “also …”
-- Why-tags: `📌 #topic`, `🗞 Multi-source`, `⭐ Trusted`, `🔥 Trending` (Reddit if enabled)
+- Why-tags: `📌 #topic`, `🗞 Multi-source`, `⭐ Trusted`, `🔥 Trending`
 - Followed-topic matches sorted to the top
 - Inline URL buttons to open full stories
 - Empty state with Region / Category / Search shortcuts
@@ -59,7 +59,7 @@ Bot menu (Telegram command list) includes: start, news, subscribe, search, follo
 - Does **not** wipe full Telegram history or all user-typed messages in DMs
 
 ### Aggregation & ranking
-- NewsData.io + country/category RSS (+ optional Reddit)
+- NewsData.io + country/category RSS
 - Story clustering (near-duplicate titles/URLs)
 - Source trust weights (e.g. Reuters, AP, BBC)
 - Shared API client, cache, and daily request budget
