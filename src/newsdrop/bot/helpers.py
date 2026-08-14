@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 import logging
 import re
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
@@ -33,7 +33,6 @@ from ..database import (
 )
 from ..news_fetcher import (
     fetch_trending_topics,
-    get_article_image,
 )
 
 logger = logging.getLogger(__name__)
@@ -294,23 +293,6 @@ def is_admin_chat(chat_id: int | None) -> bool:
     return chat_id in ADMIN_CHAT_IDS
 
 
-def _parse_daily_time(value: str) -> time:
-    try:
-        parts = value.strip().split(":")
-        if len(parts) != 2:
-            raise ValueError("Expected HH:MM format")
-
-        hour, minute = map(int, parts)
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError("Hour or minute out of range")
-
-        return time(hour, minute)
-    except Exception as exc:
-        raise ValueError(
-            "DAILY_NEWS_TIME must be in 24-hour HH:MM format, for example 08:00"
-        ) from exc
-
-
 def _get_articles(payload: dict[str, Any]) -> list[Article]:
     articles = payload.get("articles", [])
     return articles if isinstance(articles, list) else []
@@ -320,7 +302,9 @@ def _match_followed_topics(article: Article, followed_topics: list[str] | None) 
     """Return followed topics that appear in this article (word-boundary match)."""
     if not followed_topics:
         return []
-    blob = f"{article.get('title', '')} {article.get('description', '')} {article.get('content', '')}"
+    blob = (
+        f"{article.get('title', '')} {article.get('description', '')} {article.get('content', '')}"
+    )
     hits: list[str] = []
     for topic in followed_topics:
         q = topic.lower().strip()
@@ -356,12 +340,12 @@ def _personalize_articles(
             reasons.append("🗞 Multi-source")
         source_obj = item.get("source", {})
         source_name = (
-            str(source_obj.get("name", "")) if isinstance(source_obj, dict) else str(source_obj or "")
+            str(source_obj.get("name", ""))
+            if isinstance(source_obj, dict)
+            else str(source_obj or "")
         )
         if source_trust(source_name) >= 0.9:
             reasons.append("⭐ Trusted")
-        if item.get("redditTrending") or item.get("crossConfirmed"):
-            reasons.append("🔥 Trending")
         item["whyTags"] = reasons
         enriched.append(item)
 
@@ -370,7 +354,8 @@ def _personalize_articles(
         has_follow = 1 if matched else 0
         cluster = 0
         try:
-            cluster = min(int(a.get("clusterSize", 1) or 1), 5)
+            cluster_size = int(a.get("clusterSize", 1) or 1)
+            cluster = min(cluster_size, 5)
         except (TypeError, ValueError):
             pass
         return (has_follow, cluster, str(a.get("publishedAt", "") or ""))
@@ -408,9 +393,7 @@ def _build_digest_keyboard(
     if topic:
         cb = f"follow:{topic}"
         if len(cb.encode("utf-8")) <= 64:
-            rows.append(
-                [InlineKeyboardButton(f"➕ Follow #{topic}", callback_data=cb)]
-            )
+            rows.append([InlineKeyboardButton(f"➕ Follow #{topic}", callback_data=cb)])
 
     return InlineKeyboardMarkup(rows) if rows else None
 
@@ -421,7 +404,7 @@ def build_search_payload(data: NewsResponse, query: str) -> DigestResult:
     q = (query or "").strip()
     if not articles:
         empty = (
-            f'🔍 <b>No results for “{_escape_html(q)}”</b>\n\n'
+            f"🔍 <b>No results for “{_escape_html(q)}”</b>\n\n"
             "We only show whole-word matches (so “AI” won’t match “airport”).\n"
             "Try another keyword, or /news for your usual briefing."
         )
@@ -430,7 +413,7 @@ def build_search_payload(data: NewsResponse, query: str) -> DigestResult:
     shown = articles[:8]
     divider = "─" * 18
     lines: list[str] = [
-        f'🔍 <b>Search: “{_escape_html(q)}”</b>',
+        f"🔍 <b>Search: “{_escape_html(q)}”</b>",
         f"{len(shown)} result{'s' if len(shown) != 1 else ''}",
         divider,
         "",
@@ -504,9 +487,7 @@ def format_breaking_alert(
 
     keyboard = None
     if url:
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📖 Read full story", url=url)]]
-        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📖 Read full story", url=url)]])
     return "\n".join(lines), keyboard
 
 
@@ -536,7 +517,8 @@ def category_keyboard(onboarding: bool = False) -> InlineKeyboardMarkup:
     prefix = "obcategory" if onboarding else "category"
     # Two columns for a denser mobile layout.
     buttons = [
-        InlineKeyboardButton(cat.capitalize(), callback_data=f"{prefix}:{cat}") for cat in CATEGORIES
+        InlineKeyboardButton(cat.capitalize(), callback_data=f"{prefix}:{cat}")
+        for cat in CATEGORIES
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for i in range(0, len(buttons), 2):
@@ -573,7 +555,7 @@ def _build_digest_payload(
         sources = data.get("sources", []) if isinstance(data, dict) else []
         personalized = _personalize_articles(articles, followed_topics)
         shown = personalized[:10]
-        digest = _format_news_digest(shown, category, country, followed_topics, sources)
+        digest = _format_news_digest(shown, category, country, sources)
         return DigestResult(digest, None, _build_digest_keyboard(shown))
 
     sources_used = data.get("sources", []) if isinstance(data, dict) else []
@@ -626,34 +608,6 @@ def _get_source_name(article: Article) -> tuple[str, str]:
         raw = str(source_obj.get("name", "Unknown"))
         return raw, _escape_html(raw)
     return "Unknown", "Unknown"
-
-
-def _build_article_caption(index: int, article: Article) -> str:
-    title = _escape_html(article.get("title", "No title"))
-    blurb = _article_blurb(article, max_length=150)
-    _, source_escaped = _get_source_name(article)
-    rel_time = _format_relative_time(str(article.get("publishedAt", "")))
-
-    caption = f"<b>{index}. {title}</b>\n"
-    if blurb:
-        caption += f"<i>{_escape_html(blurb)}</i>\n"
-    if rel_time:
-        caption += f"⏱ {rel_time}\n"
-    caption += f"📍 {source_escaped}"
-    if article.get("redditTrending") or article.get("crossConfirmed"):
-        subreddit = str(article.get("redditSubreddit", "") or "")
-        badge = "🔥 Also trending on Reddit"
-        if subreddit:
-            badge += f" · r/{_escape_html(subreddit)}"
-        caption += f"\n{badge}"
-    return caption
-
-def _build_read_more_keyboard(article: Article) -> InlineKeyboardMarkup | None:
-    url = _safe_url(article.get("url", ""))
-    if not url:
-        return None
-
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📖 Read full article", url=url)]])
 
 
 async def _build_trending_topic_rows(
@@ -709,7 +663,6 @@ def _format_news_digest(
     articles: list[Article],
     category: str,
     country: str,
-    followed_topics: list[str] | None = None,
     sources: list[str] | None = None,
 ) -> str:
     """Format articles into a clean multi-line HTML digest for Telegram.
@@ -765,15 +718,8 @@ def _format_news_digest(
 
         why = article.get("whyTags") or []
         if isinstance(why, list) and why:
-            # Deduplicate overlapping reddit badges.
             tags = [str(t) for t in why if t]
             lines.append(" · ".join(tags))
-        elif article.get("redditTrending") or article.get("crossConfirmed"):
-            subreddit = str(article.get("redditSubreddit", "") or "")
-            badge = "🔥 Trending on Reddit"
-            if subreddit:
-                badge += f" · r/{_escape_html(subreddit)}"
-            lines.append(badge)
 
         lines.append("")  # blank line between cards
 
@@ -787,8 +733,6 @@ def _format_news_digest(
                 source_labels.append("NewsData.io")
             elif s == "rss":
                 source_labels.append("RSS")
-            elif s == "reddit":
-                source_labels.append("Reddit")
             else:
                 source_labels.append(_escape_html(s))
         if source_labels:
@@ -796,42 +740,6 @@ def _format_news_digest(
     footer_bits.append("buttons below open full articles")
     lines.append("💡 " + "  ·  ".join(footer_bits))
     return "\n".join(lines)
-
-
-async def _send_article(
-    bot: Bot,
-    chat_id: int,
-    article: Article,
-    index: int,
-) -> None:
-    """Send an article to a chat via the bot (supports photo + caption fallback)."""
-    caption = _build_article_caption(index, article)
-    keyboard = _build_read_more_keyboard(article)
-    image_url = get_article_image(article)
-
-    try:
-        if image_url:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=image_url,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard,
-            )
-        else:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard,
-            )
-    except Exception:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-        )
 
 
 async def _send_trending_results(
