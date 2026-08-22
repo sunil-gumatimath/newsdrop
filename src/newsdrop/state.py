@@ -11,8 +11,9 @@ import asyncio
 import json
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -96,9 +97,13 @@ class _MemoryBackend(StateBackend):
     """In-memory fallback when Redis is not configured."""
 
     def __init__(self) -> None:
-        self._cache: dict[str, tuple[datetime, StateValue, int]] = {}
+        # Cache stores (monotonic_timestamp, value, ttl_seconds). Using
+        # time.monotonic() avoids wall-clock jumps (NTP, DST) breaking TTLs.
+        self._cache: dict[str, tuple[float, StateValue, int]] = {}
         self._daily_count = 0
         self._daily_date = date.today()
+        # Rate limits store expiry monotonic time per entry so cleanup can
+        # respect per-entry TTL (not per-call cooldown).
         self._rate_limits: dict[str, float] = {}
         self._metrics: dict[str, int] = {}
         self._lock = asyncio.Lock()
@@ -119,7 +124,7 @@ class _MemoryBackend(StateBackend):
             if entry is None:
                 return None
             ts, value, ttl = entry
-            if (datetime.now() - ts).total_seconds() >= ttl:
+            if (time.monotonic() - ts) >= ttl:
                 del self._cache[key]
                 return None
             return value
@@ -127,20 +132,28 @@ class _MemoryBackend(StateBackend):
     async def set_cache(self, key: str, value: StateValue, ttl_seconds: int) -> None:
         async with self._lock:
             # Evict oldest 20% when cache exceeds 10,000 keys.
+            # Uses monotonic timestamp so eviction order is insertion order
+            # and unaffected by wall-clock adjustments.
             if len(self._cache) >= 10_000 and key not in self._cache:
                 sorted_keys = sorted(self._cache, key=lambda k: self._cache[k][0])
                 evict_count = max(1, len(sorted_keys) // 5)
                 for old_key in sorted_keys[:evict_count]:
                     del self._cache[old_key]
                 logger.info("Cache eviction: removed %d entries", evict_count)
-            self._cache[key] = (datetime.now(), value, ttl_seconds)
+            self._cache[key] = (time.monotonic(), value, ttl_seconds)
 
     async def check_api_budget(self, limit: int) -> bool:
+        # limit == 0 disables local limiting (DAILY_REQUEST_LIMIT=0) — always allow.
+        if limit <= 0:
+            return True
         async with self._lock:
             self._reset_day_if_needed()
             return self._daily_count < limit
 
     async def consume_api_request(self, limit: int) -> bool:
+        # limit == 0 disables local limiting — consume is a no-op that allows.
+        if limit <= 0:
+            return True
         async with self._lock:
             self._reset_day_if_needed()
             if self._daily_count >= limit:
@@ -153,22 +166,22 @@ class _MemoryBackend(StateBackend):
             self._reset_day_if_needed()
             return self._daily_count, limit
 
-    async def is_rate_limited(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
+    async def is_rate_limited(self, scope: str, chat_id: int, _cooldown_seconds: int) -> bool:
         async with self._lock:
             # Periodic cleanup of expired entries (amortized on each check).
+            # Each entry stores its expiry (monotonic) so cleanup respects
+            # per-entry TTL, not the per-call cooldown argument.
             if len(self._rate_limits) > 5000:
-                loop = asyncio.get_running_loop()
-                now = loop.time()
-                expired = [
-                    k for k, ts in self._rate_limits.items() if (now - ts) >= cooldown_seconds
-                ]
+                now = asyncio.get_running_loop().time()
+                expired = [k for k, expiry in self._rate_limits.items() if now >= expiry]
                 for k in expired:
                     del self._rate_limits[k]
                 if expired:
                     logger.info("Rate-limit cleanup: removed %d expired entries", len(expired))
-            last_call = self._rate_limits.get(self._key(scope, str(chat_id)), 0.0)
-            loop = asyncio.get_running_loop()
-            return (loop.time() - last_call) < cooldown_seconds
+            expiry = self._rate_limits.get(self._key(scope, str(chat_id)))
+            if expiry is None:
+                return False
+            return asyncio.get_running_loop().time() < expiry
 
     async def record_rate_limit(
         self,
@@ -177,7 +190,11 @@ class _MemoryBackend(StateBackend):
         _cooldown_seconds: int,
     ) -> None:
         async with self._lock:
-            self._rate_limits[self._key(scope, str(chat_id))] = asyncio.get_running_loop().time()
+            # Store expiry so cleanup can use per-entry TTL without
+            # needing the original cooldown value.
+            self._rate_limits[self._key(scope, str(chat_id))] = (
+                asyncio.get_running_loop().time() + _cooldown_seconds
+            )
 
     async def try_acquire_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
         """Atomically check + record under the same lock — no TOCTOU race.
@@ -190,21 +207,22 @@ class _MemoryBackend(StateBackend):
         """
         async with self._lock:
             # Periodic cleanup of expired entries (amortized on each call).
+            # Uses per-entry expiry, not per-call cooldown, so entries with
+            # different TTLs are evicted correctly.
             if len(self._rate_limits) > 5000:
                 now = asyncio.get_running_loop().time()
-                expired = [
-                    k for k, ts in self._rate_limits.items() if (now - ts) >= cooldown_seconds
-                ]
+                expired = [k for k, expiry in self._rate_limits.items() if now >= expiry]
                 for k in expired:
                     del self._rate_limits[k]
                 if expired:
                     logger.info("Rate-limit cleanup: removed %d expired entries", len(expired))
-            last_call = self._rate_limits.get(self._key(scope, str(chat_id)), 0.0)
+            key = self._key(scope, str(chat_id))
+            expiry = self._rate_limits.get(key)
             now = asyncio.get_running_loop().time()
-            if (now - last_call) < cooldown_seconds:
+            if expiry is not None and now < expiry:
                 # Still on cooldown — not acquired.
                 return False
-            self._rate_limits[self._key(scope, str(chat_id))] = now
+            self._rate_limits[key] = now + cooldown_seconds
             return True
 
     async def metric_increment(self, name: str, value: int = 1) -> None:
@@ -225,6 +243,10 @@ class _RedisBackend(StateBackend):
                 "redis package is required when REDIS_URL is set; install with pip install redis"
             )
         self._redis = Redis.from_url(url, decode_responses=True, socket_timeout=5)
+        # Short-lived local fallback counter for the DAILY API BUDGET so a
+        # Redis outage cannot silently un-limit free-tier spend (fail-closed).
+        self._budget_fallback_count = 0
+        self._budget_fallback_date = date.today()
 
     @staticmethod
     def _key(*parts: str) -> str:
@@ -232,6 +254,12 @@ class _RedisBackend(StateBackend):
 
     def _today(self) -> str:
         return date.today().isoformat()
+
+    def _reset_budget_fallback_if_needed(self) -> None:
+        today = date.today()
+        if today != self._budget_fallback_date:
+            self._budget_fallback_count = 0
+            self._budget_fallback_date = today
 
     async def get_cache(self, key: str) -> StateValue | None:
         try:
@@ -258,14 +286,26 @@ class _RedisBackend(StateBackend):
             logger.exception("Redis set_cache error")
 
     async def check_api_budget(self, limit: int) -> bool:
+        # limit == 0 disables local limiting (DAILY_REQUEST_LIMIT=0) — always allow.
+        if limit <= 0:
+            return True
+        self._reset_budget_fallback_if_needed()
         try:
             count = _safe_int(await self._redis.get(self._key("daily_requests", self._today())))
         except Exception:
             logger.exception("Redis check_api_budget error")
-            return True  # allow on error rather than blocking
+            # Fail CLOSED for the daily API budget: while Redis is unreachable,
+            # fall back to a short-lived local counter so a degraded backend
+            # cannot silently allow unlimited free-tier spend.
+            return self._budget_fallback_count < limit
+        # Redis answered — trust it and resync the local fallback counter.
         return count < limit
 
     async def consume_api_request(self, limit: int) -> bool:
+        # limit == 0 disables local limiting — consume is a no-op that allows.
+        if limit <= 0:
+            return True
+        self._reset_budget_fallback_if_needed()
         try:
             key = self._key("daily_requests", self._today())
             pipe = self._redis.pipeline()
@@ -273,10 +313,15 @@ class _RedisBackend(StateBackend):
             pipe.expire(key, 172800)  # 2 days
             results = await pipe.execute()
             count = _safe_int(results[0])
+            # Keep the local fallback counter roughly in sync for outage windows.
+            self._budget_fallback_count = max(self._budget_fallback_count + 1, count)
             return count <= limit
         except Exception:
             logger.exception("Redis consume_api_request error")
-            return True  # allow on error rather than blocking
+            # Fail closed via the local fallback counter.
+            allowed = self._budget_fallback_count < limit
+            self._budget_fallback_count += 1
+            return allowed
 
     async def get_api_request_count(self, limit: int) -> tuple[int, int]:
         try:
@@ -295,6 +340,8 @@ class _RedisBackend(StateBackend):
             return False  # allow on error
 
     async def record_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> None:
+        if cooldown_seconds <= 0:
+            return  # EX 0 is rejected by Redis; a 0s cooldown is a no-op anyway.
         try:
             await self._redis.setex(
                 self._key("rate_limit", scope, str(chat_id)),
@@ -311,6 +358,8 @@ class _RedisBackend(StateBackend):
         key if it does **not** already exist — this is the atomic equivalent
         of check-then-set.
         """
+        if cooldown_seconds <= 0:
+            return True  # EX 0 is rejected by Redis; a 0s cooldown allows always.
         try:
             result = await self._redis.set(
                 self._key("rate_limit", scope, str(chat_id)),

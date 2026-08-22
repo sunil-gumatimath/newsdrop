@@ -13,12 +13,16 @@ databases can be brought in line with the current application schema.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
+import tempfile
 import threading
 from pathlib import Path
 
 from .config import DEFAULT_COUNTRY
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_db_path() -> Path:
@@ -26,13 +30,66 @@ def _resolve_db_path() -> Path:
 
     Set DATABASE_PATH to store the database somewhere outside the app directory,
     for example /app/data/bot_data.db when running in Docker.
+
+    Security: the path is canonicalized via ``Path.resolve()`` and checked
+    to lie under an allowed prefix (project ``data/``, ``/app/data``, or the
+    system temp dir for tests). Paths outside these prefixes are rejected
+    with a warning and the default is used instead — this prevents
+    directory-traversal or arbitrary file writes via a crafted DATABASE_PATH.
     """
     configured_path = os.getenv("DATABASE_PATH")
-    if configured_path:
-        return Path(configured_path).expanduser()
+    if configured_path and configured_path.strip():
+        raw = Path(configured_path.strip()).expanduser()
+        try:
+            resolved = raw.resolve()
+        except Exception:
+            logger.warning("Failed to resolve DATABASE_PATH=%r, using as-is", configured_path)
+            resolved = raw.absolute()
+
+        project_root = Path(__file__).resolve().parents[2]
+        # Allowed bases: project data dir, /app/data (Docker), project root itself,
+        # and temp directory (used by tests via tmp_path / conftest).
+        candidate_bases = [
+            project_root / "data",
+            Path("/app/data"),
+            project_root,
+            Path(tempfile.gettempdir()),
+        ]
+        allowed_bases: list[Path] = []
+        for base in candidate_bases:
+            try:
+                allowed_bases.append(base.resolve())
+            except Exception:
+                allowed_bases.append(base)
+
+        is_allowed = False
+        for base in allowed_bases:
+            try:
+                # Python 3.9+: Path.is_relative_to
+                if hasattr(resolved, "is_relative_to"):
+                    if resolved.is_relative_to(base):
+                        is_allowed = True
+                        break
+                else:
+                    resolved.relative_to(base)
+                    is_allowed = True
+                    break
+            except ValueError:
+                continue
+
+        if not is_allowed:
+            logger.warning(
+                "DATABASE_PATH %r resolves to %r outside allowed prefixes %r; "
+                "falling back to default <project-root>/data/bot_data.db",
+                configured_path,
+                str(resolved),
+                [str(b) for b in allowed_bases],
+            )
+            return (project_root / "data" / "bot_data.db").resolve()
+        return resolved
     # Default to <project-root>/data/bot_data.db
     project_root = Path(__file__).resolve().parents[2]
-    return project_root / "data" / "bot_data.db"
+    return (project_root / "data" / "bot_data.db").resolve()
 
 
 DB_PATH = _resolve_db_path()
@@ -53,6 +110,8 @@ def _get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # busy_timeout avoids SQLITE_BUSY on concurrent writers (WAL + timeout).
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -275,8 +334,9 @@ def _normalize_alert_key(article_key: str) -> str:
     return " ".join(article_key.strip().lower().split())
 
 
-# Initialize on import
-_init_db()
+# NOTE: the database is initialized explicitly from the application startup
+# path (bot/main.py calls _init_db()); importing this module stays
+# side-effect-free so tooling and tests can load it without a database.
 
 
 # ── Subscribers ──────────────────────────────────────────────────────
@@ -437,6 +497,9 @@ def _set_user_prefs_sync(
     with _lock:
         conn = _get_connection()
         try:
+            # BEGIN IMMEDIATE prevents lost-update race: SELECT + INSERT
+            # is atomic w.r.t. other writers (WAL + busy_timeout handles contention).
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 """
                 SELECT country, category, timezone, daily_hour,
@@ -449,7 +512,9 @@ def _set_user_prefs_sync(
             )
             row = cursor.fetchone()
 
-            current = _row_to_prefs(row) if row else _default_prefs(default_country)
+            current = (
+                _row_to_prefs(row, default_country) if row else _default_prefs(default_country)
+            )
 
             if country is not None:
                 current["country"] = country
@@ -619,32 +684,6 @@ async def load_breaking_news_subscribers() -> set[int]:
     return await asyncio.to_thread(_load_breaking_news_subscribers_sync)
 
 
-def _was_breaking_alert_sent_sync(chat_id: int, article_key: str) -> bool:
-    """Return True if a breaking alert was already sent to this user."""
-    normalized_key = _normalize_alert_key(article_key)
-    if not normalized_key:
-        return False
-
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                """
-                SELECT 1
-                FROM breaking_alerts
-                WHERE chat_id = ? AND article_key = ?
-                """,
-                (chat_id, normalized_key),
-            )
-            return cursor.fetchone() is not None
-        finally:
-            conn.close()
-
-
-async def was_breaking_alert_sent(chat_id: int, article_key: str) -> bool:
-    return await asyncio.to_thread(_was_breaking_alert_sent_sync, chat_id, article_key)
-
-
 def _mark_breaking_alert_sent_sync(
     chat_id: int,
     article_key: str,
@@ -702,17 +741,16 @@ async def mark_breaking_alert_sent(
 
 def _cleanup_old_breaking_alerts_sync(days: int = 14) -> int:
     """Delete old breaking-alert tracking rows and return the number removed."""
-    retention_days = max(days, 1)
+    retention_days = max(int(days), 1)
 
     with _lock:
         conn = _get_connection()
         try:
             cursor = conn.execute(
-                """
+                f"""
                 DELETE FROM breaking_alerts
-                WHERE sent_at < datetime('now', ?)
-                """,
-                (f"-{retention_days} days",),
+                WHERE sent_at < datetime('now', '-{retention_days} days')
+                """
             )
             conn.commit()
             return cursor.rowcount if cursor.rowcount is not None else 0
@@ -963,3 +1001,81 @@ def _check_db_health_sync() -> dict[str, str]:
 
 async def check_db_health() -> dict[str, str]:
     return await asyncio.to_thread(_check_db_health_sync)
+
+
+def _claim_breaking_alert_slot_sync(
+    chat_id: int,
+    article_key: str,
+    article_url: str,
+    article_title: str,
+    max_per_day: int,
+) -> bool:
+    """Atomically claim a breaking-alert send slot for a user.
+
+    Combines the per-user daily cap (counting today's rows) with the
+    (chat_id, article_key) dedupe insert in a single transaction so the
+    BREAKING_ALERT_MAX_PER_DAY limit cannot be raced by concurrent workers.
+
+    Returns True when the slot is claimed (insert succeeded and the user
+    is still under the daily cap); False when the article was already sent,
+    the key is invalid, or the user has hit the daily cap.
+    """
+    normalized_key = _normalize_alert_key(article_key)
+    if not normalized_key:
+        return False
+
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM breaking_alerts
+                WHERE chat_id = ?
+                  AND sent_at >= datetime('now', 'start of day')
+                """,
+                (chat_id,),
+            )
+            row = cursor.fetchone()
+            today_count = int(row["count"]) if row else 0
+            if today_count >= max_per_day:
+                return False
+
+            insert_cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO breaking_alerts (
+                    chat_id,
+                    article_key,
+                    article_url,
+                    article_title
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    normalized_key,
+                    article_url.strip(),
+                    article_title.strip(),
+                ),
+            )
+            conn.commit()
+            return insert_cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+async def claim_breaking_alert_slot(
+    chat_id: int,
+    article_key: str,
+    article_url: str = "",
+    article_title: str = "",
+    max_per_day: int = 10,
+) -> bool:
+    return await asyncio.to_thread(
+        _claim_breaking_alert_slot_sync,
+        chat_id,
+        article_key,
+        article_url,
+        article_title,
+        max_per_day,
+    )

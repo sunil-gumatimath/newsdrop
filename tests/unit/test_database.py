@@ -86,9 +86,7 @@ async def test_default_country_honored_for_new_user(tmp_db):
     would silently store "us".
     """
     chat_id = 4242
-    prefs = await database.set_user_prefs(
-        chat_id, timezone="Asia/Kolkata", default_country="in"
-    )
+    prefs = await database.set_user_prefs(chat_id, timezone="Asia/Kolkata", default_country="in")
     assert prefs["country"] == "in"
 
     reread = await database.get_user_prefs(chat_id, default_country="in")

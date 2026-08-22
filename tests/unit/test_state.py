@@ -80,13 +80,13 @@ async def test_try_acquire_rate_limit_does_not_deadlock():
 
     backend = _MemoryBackend()
     # First acquire succeeds.
-    assert await asyncio.wait_for(
-        backend.try_acquire_rate_limit("news", 123, 10), timeout=3
-    ) is True
+    assert (
+        await asyncio.wait_for(backend.try_acquire_rate_limit("news", 123, 10), timeout=3) is True
+    )
     # Still within cooldown -> refused, but returns (does not hang).
-    assert await asyncio.wait_for(
-        backend.try_acquire_rate_limit("news", 123, 10), timeout=3
-    ) is False
+    assert (
+        await asyncio.wait_for(backend.try_acquire_rate_limit("news", 123, 10), timeout=3) is False
+    )
 
 
 async def test_try_acquire_rate_limit_distinct_scopes():
