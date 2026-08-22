@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import signal
 import sys
-import threading
-from types import FrameType
 from typing import Any, cast
 
 from apscheduler.schedulers import SchedulerNotRunningError
@@ -19,13 +16,15 @@ from telegram.ext import (
 from ..config import (
     BREAKING_ALERT_INTERVAL_MINUTES,
     TELEGRAM_BOT_TOKEN,
+    validate_config,
 )
 from ..logging_config import setup_logging
 from ..metrics import UNEXPECTED_ERRORS, increment
+from ..news_fetcher import close_http_client
 from .callbacks import button_handler
 from .commands import (
-    breakkeywords,
     breaking_toggle,
+    breakkeywords,
     clear_chat,
     follow_topic,
     health,
@@ -109,16 +108,42 @@ async def _drain_and_stop(app: Application[Any, Any, Any, Any, Any, Any]) -> Non
         logger.debug("Scheduler was already stopped — nothing to shut down.")
     except Exception:
         logger.exception("Error while shutting down job queue")
+    try:
+        await close_http_client()
+    except Exception:
+        logger.exception("Error while closing HTTP client")
+
+
+async def _post_shutdown(_app: Application) -> None:
+    """Flip readiness off once PTB has fully shut down (run_polling calls this)."""
+    set_ready(False)
+    logger.info("Application shutdown complete — readiness set to False.")
 
 
 def main() -> None:
     setup_logging()
 
+    # Fail fast on missing/malformed configuration before touching Telegram.
+    validate_config()
+
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
         sys.exit(1)
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Initialize the database schema before handlers/jobs run.
+    from ..database import _init_db  # local import keeps module import side-effect-free
+
+    _init_db()
+
+    # post_init must be set via the builder — ``Application.post_init`` is a
+    # read-only property in PTB v20+ and assigning it raises AttributeError.
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(_setup_commands)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("news", news))
     app.add_handler(CommandHandler("search", search))
@@ -144,7 +169,6 @@ def main() -> None:
     app.add_handler(CommandHandler("commands", help_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(error_handler)
-    app.post_init = _setup_commands
 
     if app.job_queue is None:
         logger.error("Job queue is unavailable. Install job-queue dependencies.")
@@ -177,20 +201,10 @@ def main() -> None:
     # Mark the application as ready so /ready returns 200.
     set_ready(True)
 
-    # Graceful shutdown: drain in-flight updates and stop the job queue
-    # when SIGTERM/SIGINT arrives. The signal handler flips _ready and
-    # schedules shutdown_event.set() on the main loop; after run_polling
-    # returns, we drain the application.
-    shutdown_event = threading.Event()
-
-    def _shutdown(signum: int, _frame: FrameType | None) -> None:
-        sig_name = signal.Signals(signum).name
-        logger.info("Received %s — initiating graceful shutdown...", sig_name)
-        set_ready(False)
-        shutdown_event.set()
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+    # Signal handling is left to run_polling: it installs its own SIGINT/SIGTERM
+    # handlers (loop.add_signal_handler on POSIX) that stop the loop cleanly.
+    # Custom handlers here would either be replaced (POSIX) or swallow Ctrl+C
+    # so polling never stops (Windows). Readiness flip happens in post_shutdown.
 
     logger.info("Daily news job runs hourly; delivery uses each user's timezone/hour")
     logger.info("Bot starting...")

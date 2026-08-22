@@ -1,26 +1,72 @@
+import logging
 import os
 import re
 
 from dotenv import load_dotenv
 
-# Ensure values from `.env` take precedence over any stale OS-level variables.
+# load_dotenv with override=True: values from `.env` take precedence over
+# any pre-existing OS environment variables. This is intentional for local
+# development where `.env` is authoritative. In production (Docker/GCE),
+# the container's environment is injected via compose/metadata and may not
+# have a `.env` file; override=True means a stale `.env` on disk would
+# shadow the injected env — ensure `.env` is regenerated on deploy (see
+# terraform/templates/startup.sh) or set override=False if you want
+# OS-level env to win. Keeping override=True preserves local-dev ergonomics
+# but operators should be aware. See docker-compose.yml and docs.
 load_dotenv(override=True)
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    """Parse int env var with fallback and warning on invalid values.
+
+    Returns ``default`` if the variable is unset, empty, or not a valid
+    integer. Logs a warning on invalid values so misconfigurations are
+    visible without crashing import (important for mypy/tooling).
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    raw = raw.strip()
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        logger.warning("Invalid integer for %s=%r, falling back to %s", name, raw, default)
+        return default
+
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if TELEGRAM_BOT_TOKEN:
     TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN.strip()
+
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+if NEWS_API_KEY:
+    NEWS_API_KEY = NEWS_API_KEY.strip()
+
+
+def validate_config() -> None:
+    """Validate required configuration at startup (call explicitly from main()).
+
+    Importing this module must stay side-effect-free so tooling, tests, and
+    type-checkers can load config without a real environment. Missing or
+    malformed values raise ``ValueError`` here, not at import time.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError(
+            "TELEGRAM_BOT_TOKEN not found in environment variables. "
+            "Please set it in your .env file or environment."
+        )
     if not re.match(r"^\d+:[A-Za-z0-9_-]+$", TELEGRAM_BOT_TOKEN):
         raise ValueError(
             "TELEGRAM_BOT_TOKEN format is invalid. Expected '<digits>:<alphanumeric>'. "
             "Please check your .env file or environment."
         )
-
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-if not NEWS_API_KEY:
-    raise ValueError(
-        "NEWS_API_KEY not found in environment variables. "
-        "Please set it in your .env file or environment."
-    )
+    if not NEWS_API_KEY:
+        raise ValueError(
+            "NEWS_API_KEY not found in environment variables. "
+            "Please set it in your .env file or environment."
+        )
 
 DAILY_NEWS_TIME = os.getenv("DAILY_NEWS_TIME", "08:00")
 DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "us")
@@ -30,25 +76,24 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "")
 # Multi-source support. Set ENABLE_RSS=0 to disable RSS augmentation.
 ENABLE_RSS = os.getenv("ENABLE_RSS", "1") not in ("0", "false", "False", "no")
 
-# Reddit popularity boost. Set ENABLE_REDDIT=1 to rank stories higher when they
-# also appear in curated subreddits. This is a trend signal, not a fact-check.
-# Default off until explicitly enabled.
-ENABLE_REDDIT = os.getenv("ENABLE_REDDIT", "0") not in ("0", "false", "False", "no")
-
 # NewsData.io free tier request budget. Set to 0 to disable local request limiting.
-DAILY_REQUEST_LIMIT = int(os.getenv("DAILY_REQUEST_LIMIT", "200"))
+# Uses _safe_int_env so invalid values (e.g. "abc") fall back to 200 with a warning
+# instead of crashing import (which would break mypy/tooling).
+# Note: 0 is allowed and means "no local limiting" — callers must check
+# `if DAILY_REQUEST_LIMIT == 0` rather than `if DAILY_REQUEST_LIMIT > 0 else 200`.
+DAILY_REQUEST_LIMIT = _safe_int_env("DAILY_REQUEST_LIMIT", 200)
 
 # Per-user command cooldowns (seconds). Protects against accidental spam that
 # would burn the upstream daily budget. Set to 0 to disable a cooldown entirely
 # (e.g. solo self-hosted deployments where the friction isn't useful).
 # Defaults 0 (off) for solo self-hosted use; set >0 if you share the bot.
-NEWS_COOLDOWN_SECONDS = int(os.getenv("NEWS_COOLDOWN_SECONDS", "0"))
-SEARCH_COOLDOWN_SECONDS = int(os.getenv("SEARCH_COOLDOWN_SECONDS", "0"))
+NEWS_COOLDOWN_SECONDS = _safe_int_env("NEWS_COOLDOWN_SECONDS", 0)
+SEARCH_COOLDOWN_SECONDS = _safe_int_env("SEARCH_COOLDOWN_SECONDS", 0)
 
 # Breaking-news alert settings.
-BREAKING_ALERT_INTERVAL_MINUTES = int(os.getenv("BREAKING_ALERT_INTERVAL_MINUTES", "30"))
-BREAKING_ALERT_RETENTION_DAYS = int(os.getenv("BREAKING_ALERT_RETENTION_DAYS", "14"))
-BREAKING_ALERT_MAX_PER_DAY = int(os.getenv("BREAKING_ALERT_MAX_PER_DAY", "5"))
+BREAKING_ALERT_INTERVAL_MINUTES = _safe_int_env("BREAKING_ALERT_INTERVAL_MINUTES", 30)
+BREAKING_ALERT_RETENTION_DAYS = _safe_int_env("BREAKING_ALERT_RETENTION_DAYS", 14)
+BREAKING_ALERT_MAX_PER_DAY = _safe_int_env("BREAKING_ALERT_MAX_PER_DAY", 5)
 # When True, followed topics are used as alert keywords for opted-in users.
 BREAKING_USE_FOLLOWED_TOPICS = os.getenv("BREAKING_USE_FOLLOWED_TOPICS", "1") not in (
     "0",
@@ -65,7 +110,7 @@ BREAKING_ALERT_KEYWORDS = [
     ).split(",")
     if keyword.strip()
 ]
-MAX_BREAKING_KEYWORDS_PER_USER = int(os.getenv("MAX_BREAKING_KEYWORDS_PER_USER", "10"))
+MAX_BREAKING_KEYWORDS_PER_USER = _safe_int_env("MAX_BREAKING_KEYWORDS_PER_USER", 10)
 
 # Admin chat IDs allowed to use /health (comma-separated). Empty = nobody
 # (diagnostics stay on HTTP /health and /metrics only).
@@ -322,4 +367,3 @@ CATEGORY_KEYWORDS = {
         "dna",
     ],
 }
-

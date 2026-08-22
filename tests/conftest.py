@@ -45,9 +45,15 @@ def tmp_db(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_database_mod, "DB_PATH", Path(db_file_str))
 
+    # Close any cached connection from the pre-import DB path so the new
+    # path takes effect without stale closed-connection errors.
+    _database_mod._close_cached_connections()
     _database_mod._init_db()
 
     yield db_file_str
+
+    # Teardown: close the test connection to release the file lock.
+    _database_mod._close_cached_connections()
 
 
 @pytest.fixture(autouse=True)

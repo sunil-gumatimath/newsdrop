@@ -100,9 +100,7 @@ class TestRetryLogic:
                     new_callable=AsyncMock,
                     return_value=True,
                 ),
-                patch(
-                    "newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None
-                ),
+                patch("newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None),
                 patch("asyncio.sleep", new_callable=AsyncMock),
                 pytest.raises(APIClientError),
             ):
@@ -137,9 +135,7 @@ class TestRetryLogic:
                     new_callable=AsyncMock,
                     return_value=True,
                 ),
-                patch(
-                    "newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None
-                ),
+                patch("newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None),
                 patch("asyncio.sleep", new_callable=AsyncMock),
                 pytest.raises(APIClientError),
             ):
@@ -182,9 +178,7 @@ class TestRetryLogic:
                     new_callable=AsyncMock,
                     return_value=True,
                 ),
-                patch(
-                    "newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None
-                ),
+                patch("newsdrop.news_fetcher.cache_get", new_callable=AsyncMock, return_value=None),
                 patch("newsdrop.news_fetcher.api_request_consume", new_callable=AsyncMock),
                 patch("asyncio.sleep", new_callable=AsyncMock),
             ):
