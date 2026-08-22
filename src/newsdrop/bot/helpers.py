@@ -299,7 +299,12 @@ def _get_articles(payload: dict[str, Any]) -> list[Article]:
 
 
 def _match_followed_topics(article: Article, followed_topics: list[str] | None) -> list[str]:
-    """Return followed topics that appear in this article (word-boundary match)."""
+    """Return followed topics that appear in this article (token-boundary match).
+
+    Uses the same lookaround idiom as ``jobs._keyword_pattern`` and
+    ``news_fetcher._term_pattern`` so topics like ``c++`` can match — a
+    ``\\b`` boundary would fail when the topic ends in a non-word character.
+    """
     if not followed_topics:
         return []
     blob = (
@@ -310,8 +315,8 @@ def _match_followed_topics(article: Article, followed_topics: list[str] | None) 
         q = topic.lower().strip()
         if not q:
             continue
-        pattern = re.compile(rf"\b{re.escape(q)}\b", re.IGNORECASE)
-        if pattern.search(blob) or q in blob.lower():
+        pattern = re.compile(rf"(?<![a-z0-9]){re.escape(q)}(?![a-z0-9])", re.IGNORECASE)
+        if pattern.search(blob):
             hits.append(topic)
     return hits
 
@@ -503,21 +508,27 @@ def _empty_digest_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def country_keyboard(onboarding: bool = False) -> InlineKeyboardMarkup:
+def country_keyboard(
+    onboarding: bool = False, user_id: int | None = None
+) -> InlineKeyboardMarkup:
     prefix = "obcountry" if onboarding else "country"
+    suffix = f":{user_id}" if user_id is not None else ""
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(display, callback_data=f"{prefix}:{code}")]
+            [InlineKeyboardButton(display, callback_data=f"{prefix}:{code}{suffix}")]
             for display, code in COUNTRIES.items()
         ]
     )
 
 
-def category_keyboard(onboarding: bool = False) -> InlineKeyboardMarkup:
+def category_keyboard(
+    onboarding: bool = False, user_id: int | None = None
+) -> InlineKeyboardMarkup:
     prefix = "obcategory" if onboarding else "category"
+    suffix = f":{user_id}" if user_id is not None else ""
     # Two columns for a denser mobile layout.
     buttons = [
-        InlineKeyboardButton(cat.capitalize(), callback_data=f"{prefix}:{cat}")
+        InlineKeyboardButton(cat.capitalize(), callback_data=f"{prefix}:{cat}{suffix}")
         for cat in CATEGORIES
     ]
     rows: list[list[InlineKeyboardButton]] = []
@@ -718,7 +729,7 @@ def _format_news_digest(
 
         why = article.get("whyTags") or []
         if isinstance(why, list) and why:
-            tags = [str(t) for t in why if t]
+            tags = [_escape_html(str(t)) for t in why if t]
             lines.append(" · ".join(tags))
 
         lines.append("")  # blank line between cards

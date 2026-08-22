@@ -31,10 +31,13 @@ from ..news_fetcher import (
     search_news,
 )
 from ..state import (
-    rate_limit_check,
-    rate_limit_record,
+    rate_limit_try_acquire,
 )
 from .helpers import (
+    NEWS_COOLDOWN_SECONDS as _NEWS_COOLDOWN_SECONDS,
+)
+from .helpers import (
+    NEWS_RATE_LIMIT_SCOPE,
     SEARCH_COOLDOWN_SECONDS,
     SEARCH_RATE_LIMIT_SCOPE,
     _build_digest_payload,
@@ -91,10 +94,12 @@ async def _handle_obcountry_callback(query: CallbackQuery, chat_id: int, value: 
     name = _country_name_from_code(value)
     await set_user_prefs(chat_id, country=value)
     _ = await query.edit_message_text(
-        f"✅ Region: <b>{_escape_html(name)}</b>\n\n"
-        "<b>Step 2 of 3 — pick a category</b>",
+        f"✅ Region: <b>{_escape_html(name)}</b>\n\n<b>Step 2 of 3 — pick a category</b>",
         parse_mode=ParseMode.HTML,
-        reply_markup=category_keyboard(onboarding=True),
+        reply_markup=category_keyboard(
+            onboarding=True,
+            user_id=query.from_user.id if query.from_user else None,
+        ),
     )
 
 
@@ -143,8 +148,64 @@ async def _handle_obsub_callback(query: CallbackQuery, chat_id: int, value: str)
     )
 
 
+# Actions whose buttons mutate chat state or trigger API spend. Their callback
+# payloads carry the originating user's id as a trailing ":<user_id>" segment.
+_OWNED_CALLBACK_ACTIONS = frozenset(
+    {
+        "country",
+        "category",
+        "obcountry",
+        "obcategory",
+        "obsub",
+        "menu",
+        "breaking",
+        "breakfollows",
+        "dailyhour",
+        "tz",
+        "follow",
+        "unfollow",
+    }
+)
+
+
+def _extract_ownership_user_id(update: Update, action: str) -> int | None:
+    """Return the originating user id embedded in *action* callbacks, if any.
+
+    Only ``country:<code>:<user_id>``-style payloads (an extra trailing numeric
+    segment on an owned action) yield a value; legacy two-segment payloads and
+    confirm/cancel (which verify ownership themselves) return None.
+    """
+    if action in ("confirm", "cancel"):
+        # Verified inside _handle_confirm_or_cancel.
+        return None
+    if action not in _OWNED_CALLBACK_ACTIONS:
+        return None
+
+    query = update.callback_query
+    if query is None or not query.data:
+        return None
+    parts = query.data.split(":")
+    # Owned actions are "<action>:<value>[:<user_id>]". A trailing pure-integer
+    # third segment marks the owner.
+    if len(parts) >= 3 and parts[-1].isdigit():
+        try:
+            return int(parts[-1])
+        except ValueError:  # pragma: no cover - isdigit guarantees int()
+            return None
+    return None
+
+
 async def _handle_obnews_callback(query: CallbackQuery, chat_id: int) -> None:
     """Finish onboarding by sending a live briefing in-place."""
+    if not await rate_limit_try_acquire(
+        NEWS_RATE_LIMIT_SCOPE, chat_id, _NEWS_COOLDOWN_SECONDS
+    ):
+        await increment(COMMAND_NEWS)
+        _ = await query.answer(
+            f"⏳ Please wait {_NEWS_COOLDOWN_SECONDS}s before requesting news again.",
+            show_alert=True,
+        )
+        return
     await increment(COMMAND_TOTAL)
     await increment(COMMAND_NEWS)
     prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
@@ -182,27 +243,29 @@ async def _handle_obnews_callback(query: CallbackQuery, chat_id: int) -> None:
         )
     except Exception:
         logger.exception("Onboarding news fetch failed")
-        _ = await query.edit_message_text(
-            "🔧 Something went wrong. Try /news in a moment."
-        )
+        _ = await query.edit_message_text("🔧 Something went wrong. Try /news in a moment.")
 
 
 async def _handle_menu_callback(query: CallbackQuery, value: str) -> None:
     if value == "country":
         _ = await query.edit_message_text(
             "🌍 Select your news region:",
-            reply_markup=country_keyboard(onboarding=False),
+            reply_markup=country_keyboard(
+                onboarding=False,
+                user_id=query.from_user.id if query.from_user else None,
+            ),
         )
     elif value == "category":
         _ = await query.edit_message_text(
             "📂 Select your news category:",
-            reply_markup=category_keyboard(onboarding=False),
+            reply_markup=category_keyboard(
+                onboarding=False,
+                user_id=query.from_user.id if query.from_user else None,
+            ),
         )
     elif value == "search_hint":
         _ = await query.edit_message_text(
-            "🔍 Search for a topic:\n\n"
-            "<code>/search bitcoin</code>\n"
-            "<code>/search climate</code>",
+            "🔍 Search for a topic:\n\n<code>/search bitcoin</code>\n<code>/search climate</code>",
             parse_mode=ParseMode.HTML,
         )
     else:
@@ -275,7 +338,7 @@ async def _handle_search_callback(
         _ = await query.edit_message_text("⚠️ Search message is unavailable.")
         return
 
-    if await rate_limit_check(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
+    if not await rate_limit_try_acquire(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
         _ = await query.answer(
             f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS}s before searching again.",
             show_alert=True,
@@ -305,7 +368,7 @@ async def _handle_search_callback(
                 disable_web_page_preview=True,
                 reply_markup=result.reply_markup,
             )
-        await rate_limit_record(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS)
+        # rate limit was already acquired atomically at the top of this handler
     except APIClientError:
         logger.exception("Callback search failed")
         _ = await status_msg.edit_text("🔧 Could not fetch news. Please try again later.")
@@ -450,9 +513,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer()
         return
 
-    await query.answer()
-
     data = query.data or ""
+
+    # Ownership check: state-changing callbacks carry the originating user's
+    # id as a trailing ":<user_id>" segment. Ignore taps from anyone else
+    # (e.g. group members tapping old buttons). Legacy payloads without the
+    # suffix are still accepted for backward compatibility.
     parsed = _parse_callback_data(data)
     if parsed is None:
         logger.warning("Invalid callback data format: %s", data)
@@ -460,6 +526,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     action, value = parsed
+    expected_user_id = _extract_ownership_user_id(update, action)
+    if (
+        expected_user_id is not None
+        and query.from_user is not None
+        and query.from_user.id != expected_user_id
+    ):
+        await query.answer("Not your session.", show_alert=True)
+        return
+
+    # Answer the query once, here, for all branches that do NOT answer it
+    # themselves (e.g. the search rate-limit alert answers its own query).
+    if action != "search":
+        await query.answer()
 
     if action == "country":
         await _handle_country_callback(query, chat_id, value)

@@ -88,6 +88,9 @@ async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
 
     from .helpers import country_keyboard
 
+    user = update.effective_user
+    user_id = user.id if user else None
+
     welcome = (
         "Welcome to <b>newsdrop</b> 📰\n\n"
         "Personalized headlines in Telegram — multi-source, ranked, short blurbs.\n\n"
@@ -98,7 +101,7 @@ async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     _ = await message.reply_text(
         welcome,
         parse_mode=ParseMode.HTML,
-        reply_markup=country_keyboard(onboarding=True),
+        reply_markup=country_keyboard(onboarding=True, user_id=user_id),
     )
 
 
@@ -360,6 +363,8 @@ async def set_country(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
 
     from .helpers import country_keyboard
 
+    user = update.effective_user
+    user_id = user.id if user else None
     current = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     current_code = current.get("country", DEFAULT_COUNTRY)
     current_name = _country_name_from_code(current_code)
@@ -367,7 +372,7 @@ async def set_country(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
     _ = await message.reply_text(
         f"🌍 Current region: <b>{_escape_html(current_name)}</b>\n\nSelect your news region:",
         parse_mode=ParseMode.HTML,
-        reply_markup=country_keyboard(onboarding=False),
+        reply_markup=country_keyboard(onboarding=False, user_id=user_id),
     )
 
 
@@ -379,6 +384,8 @@ async def set_category(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
 
     from .helpers import category_keyboard
 
+    user = update.effective_user
+    user_id = user.id if user else None
     current = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     current_cat = current.get("category", "general")
 
@@ -386,7 +393,7 @@ async def set_category(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
         f"📂 Current category: <b>{_escape_html(current_cat.capitalize())}</b>\n\n"
         f"Select your news topic:",
         parse_mode=ParseMode.HTML,
-        reply_markup=category_keyboard(onboarding=False),
+        reply_markup=category_keyboard(onboarding=False, user_id=user_id),
     )
 
 
