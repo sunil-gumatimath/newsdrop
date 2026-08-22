@@ -11,6 +11,7 @@ Title-similarity and URL-canonicalisation logic is imported from
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -83,7 +84,10 @@ def source_trust(source_name_str: str) -> float:
 
     best = _DEFAULT_TRUST
     for key, weight in SOURCE_TRUST.items():
-        if key in name:
+        # Use word-boundary regex to avoid false positives
+        # (e.g. "nyt" should not match inside "anytime", "bbc" not inside "bbcworld").
+        pattern = r"\b" + re.escape(key.lower()) + r"\b"
+        if re.search(pattern, name):
             best = max(best, weight)
     return best
 
@@ -119,7 +123,10 @@ def cluster_articles(articles: list[Article]) -> list[list[Article]]:
     for article in articles:
         placed = False
         for cluster in clusters:
-            if same_story(cluster[0], article):
+            # Compare against any article in the cluster to avoid order dependence
+            # (earlier version only compared to cluster[0] and could miss matches
+            # when the first element was a short Outlier title but a later member matched).
+            if any(same_story(existing, article) for existing in cluster):
                 cluster.append(article)
                 placed = True
                 break

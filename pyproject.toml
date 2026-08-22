@@ -23,14 +23,14 @@ classifiers = [
 ]
 dependencies = [
     "python-telegram-bot>=22.7,<23",
-    "httpx>=0.28.1",
-    "feedparser>=6.0.12",
+    "httpx>=0.28.1,<0.29",
+    "feedparser>=6.0.12,<7",
     "python-dotenv>=1.2.2",
     "redis>=5.0,<6",
     "apscheduler>=3.10,<4",
 ]
 [project.scripts]
-newsdrop = "newsdrop.bot:main"
+newsdrop = "newsdrop.bot.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -41,7 +41,7 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 asyncio_mode = "auto"
-addopts = "--cov=src/newsdrop --cov-report=term-missing --cov-report=html --cov-fail-under=0"
+addopts = "--cov=src/newsdrop --cov-report=term-missing --cov-report=html --cov-fail-under=70"
 
 [tool.ruff]
 line-length = 100
@@ -59,6 +59,7 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_ignores = true
 ignore_missing_imports = true
+disallow_untyped_defs = true
 
 [dependency-groups]
 dev = [

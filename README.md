@@ -15,11 +15,11 @@ Your personalized news briefing, delivered straight to Telegram.
 - **Guided onboarding** — `/start` walks region → category → subscribe or get news now.
 - **Daily digests** — Scheduled briefings at each user’s local hour; API batched by `(country, category)`.
 - **On-demand `/news`** — Card layout with blurbs, relative time, source line, multi-outlet tags, and open-article buttons.
-- **Smart ranking** — Story clustering, source trust weights, followed-topic boost, optional Reddit popularity signal.
+- **Smart ranking** — Story clustering, source trust weights, followed-topic boost.
 - **Topic search** — `/search` with whole-word matching, relevance ranking, and one-tap **Follow**.
 - **Followed topics** — Float matches to the top of digests with `📌` why-tags.
 - **Breaking alerts** — Compact alerts with matched keyword reason, daily cap, open button; quiet hours supported.
-- **Multi-source aggregation** — NewsData.io + country/category RSS (+ optional Reddit); cache and free-tier budget protection.
+- **Multi-source aggregation** — NewsData.io + country/category RSS; cache and free-tier budget protection.
 - **Preferences** — Region, category, digest hour, timezone, quiet hours, breaking keywords.
 - **`/clear`** — Clean recent bot-accessible messages (with confirmation).
 - **SQLite + optional Redis** — WAL SQLite for prefs/subs/dedupe; Redis for shared cache/rate limits when set.
@@ -78,13 +78,11 @@ graph TD
     subgraph "Data Source Aggregation"
         Fetcher -->|"1. NewsData.io"| NewsAPI["NewsData.io API"]
         Fetcher -->|"2. Parallel RSS"| RSS["rss_feeds.py"]
-        Fetcher -->|"3. Optional Reddit"| Reddit["reddit_feeds.py"]
     end
 
     subgraph "External Sources"
         NewsAPI -.->|"HTTPS JSON"| WebAPI[("NewsData Endpoints")]
         RSS -.->|"HTTPS GET & feedparser"| Feeds[("External RSS Feeds")]
-        Reddit -.->|"Public JSON / RSS"| Subs[("Curated Subreddits")]
     end
 
     subgraph "Shared State (optional)"
@@ -107,7 +105,6 @@ graph TD
     style Ranker fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b
     style NewsAPI fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b
     style RSS fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b
-    style Reddit fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b
     style WebAPI fill:#ffe0b2,stroke:#f57c00,stroke-width:2px,color:#e65100
     style Feeds fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#1b5e20
     style Subs fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#1b5e20
@@ -207,7 +204,6 @@ docker compose up -d --build
 | `DEFAULT_TIMEZONE` | `UTC` | Default IANA timezone |
 | `DATABASE_PATH` | `<project-root>/data/bot_data.db` | SQLite path (Docker: `/app/data/bot_data.db`) |
 | `ENABLE_RSS` | `1` | RSS augmentation/fallback. Set `0` to disable |
-| `ENABLE_REDDIT` | `0` | Reddit popularity boost. Set `1` to enable (no Reddit API key) |
 | `DAILY_REQUEST_LIMIT` | `200` | Local NewsData.io budget. Set `0` to disable gate |
 | `NEWS_COOLDOWN_SECONDS` | `0` | Per-user cooldown for `/news` / `/trending`. `0` = off |
 | `SEARCH_COOLDOWN_SECONDS` | `0` | Per-user cooldown for `/search`. `0` = off |
@@ -216,7 +212,7 @@ docker compose up -d --build
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
 | `LOG_FORMAT` | `text` | `text` or `json` |
 | `HEALTH_PORT` | `8080` | HTTP health server port |
-| `NEWSDROP_USER_AGENT` | *(built-in)* | User-Agent for RSS / Reddit fetches |
+| `NEWSDROP_USER_AGENT` | *(built-in)* | User-Agent for RSS fetches |
 | `ADMIN_CHAT_IDS` | *(empty)* | Comma-separated IDs allowed to use Telegram `/health` |
 | `BREAKING_ALERT_INTERVAL_MINUTES` | `30` | Breaking poll interval; `0` disables job |
 | `BREAKING_ALERT_RETENTION_DAYS` | `14` | Dedupe retention for sent alerts |
@@ -268,9 +264,8 @@ Fetches run in parallel where possible:
 
 1. **NewsData.io** — primary structured headlines / search.
 2. **RSS** — country feeds + category-specific feeds (tech, sports, science, …); feed health cooldown on repeated failures.
-3. **Reddit** (optional, `ENABLE_REDDIT=1`) — boost stories also hot in curated subreddits.
-4. **Cluster + rank** — near-duplicate merge; trust, multi-source corroboration, freshness, Reddit signal.
-5. **Graceful degradation** — if the API budget or API itself fails, RSS can still fill digests.
+3. **Cluster + rank** — near-duplicate merge; trust, multi-source corroboration, freshness.
+4. **Graceful degradation** — if the API budget or API itself fails, RSS can still fill digests.
 
 Search applies **whole-word** filters and relevance ranking so short queries (e.g. `AI`) do not match substrings inside unrelated words.
 
