@@ -1,13 +1,30 @@
-version: "3.8"
-
+# NOTE: REDIS_PASSWORD must be set in .env (see .env.example). If empty,
+# redis will fail to start because --requirepass requires a non-empty value.
+# Generate a strong password: `openssl rand -base64 24` and set REDIS_PASSWORD.
+# REDIS_URL in the newsdrop service must use the same password.
 services:
   redis:
     image: redis:7-alpine
     container_name: newsdrop-redis
     restart: unless-stopped
+    # --requirepass enforces authentication; empty REDIS_PASSWORD will cause
+    # redis-server to error on startup (fail-closed). Do not commit .env.
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     volumes:
       - redis_data:/data
+    # Healthcheck ensures redis is ready before newsdrop starts (see depends_on).
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    # Logging with rotation prevents unbounded disk usage.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -26,8 +43,22 @@ services:
       - PYTHONUNBUFFERED=1
       - DATABASE_PATH=/app/data/bot_data.db
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+    # Wait for redis healthcheck to pass; prevents race where bot starts before redis is ready.
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    # Security hardening: read-only rootfs + no-new-privileges.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    # Logging with rotation (same as redis) to bound disk usage.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
