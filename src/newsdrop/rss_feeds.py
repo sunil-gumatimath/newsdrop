@@ -15,6 +15,7 @@ import re
 import time
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlparse
 
 import feedparser
 import httpx
@@ -40,6 +41,7 @@ RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
         ("NPR World", "https://feeds.npr.org/1004/rss.xml"),
     ],
     "in": [
+        ("News on AIR", "https://newsonair.gov.in/category/national/feed/"),
         ("Times of India", "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"),
         ("The Hindu", "https://www.thehindu.com/news/national/feeder/default.rss"),
         ("NDTV", "https://feeds.feedburner.com/ndtvnews-top-stories"),
@@ -90,16 +92,21 @@ RSS_CATEGORY_FEEDS: dict[str, list[tuple[str, str]]] = {
     ],
     "business": [
         ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
-        ("CNBC", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147"),
+        (
+            "CNBC",
+            "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147",
+        ),
         ("NPR Business", "https://feeds.npr.org/1006/rss.xml"),
         ("The Guardian Business", "https://www.theguardian.com/uk/business/rss"),
         ("Reuters Business", "https://openrss.org/feed/www.reuters.com/business"),
+        ("News on AIR Business", "https://newsonair.gov.in/category/business/feed/"),
     ],
     "sports": [
         ("BBC Sport", "https://feeds.bbci.co.uk/sport/rss.xml"),
         ("ESPN", "https://www.espn.com/espn/rss/news"),
         ("The Guardian Sport", "https://www.theguardian.com/uk/sport/rss"),
         ("NPR Sports", "https://feeds.npr.org/1055/rss.xml"),
+        ("News on AIR Sports", "https://newsonair.gov.in/category/sports/feed/"),
     ],
     "entertainment": [
         ("BBC Entertainment", "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml"),
@@ -158,10 +165,13 @@ def _record_feed_failure(url: str) -> None:
         )
 
 
-def _strip_html(text: str) -> str:
+def _strip_html(text: str | None) -> str:
     """Remove HTML tags from a string (RSS summaries often contain markup)."""
+    if text is None or text == "":
+        return ""
     if not text:
         return ""
+    text = str(text)
     # Replace <br> and </p> with spaces before stripping
     text = re.sub(r"<br\s*/?>|</p>", " ", text, flags=re.IGNORECASE)
     # Strip remaining tags
@@ -219,9 +229,9 @@ def _extract_image(entry: dict) -> str:
     for enc in entry.get("enclosures", []) or []:
         if enc.get("type", "").startswith("image/") and enc.get("href"):
             return str(enc["href"])
-    # image in summary/content
+    # image in summary/content — handle both single and double quoted src
     summary = entry.get("summary") or ""
-    match = re.search(r'<img[^>]+src="([^"]+)"', summary)
+    match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary, re.IGNORECASE)
     if match:
         return match.group(1)
     return ""
@@ -253,18 +263,33 @@ def _entry_body_text(entry: dict) -> str:
     return _strip_html(candidates[0]) if candidates else ""
 
 
+def _safe_url(url: object) -> str:
+    """Return a validated http(s) URL, or "" if invalid/missing."""
+    if not isinstance(url, str):
+        return ""
+    candidate = url.strip()
+    if not candidate:
+        return ""
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return candidate
+
+
 def _entry_to_article(entry: dict, source_name: str) -> dict:
     """Convert a feedparser entry into the NewsAPI-style shape used by bot.py."""
     title = _strip_html(entry.get("title", "")) or "No title"
-    url = entry.get("link", "") or ""
     description = _entry_body_text(entry)
 
     return {
         "title": title,
-        "url": url,
+        "url": _safe_url(entry.get("link", "") or ""),
         "description": description,
         "content": description,
-        "urlToImage": _extract_image(entry),
+        "urlToImage": _safe_url(_extract_image(entry)),
         "publishedAt": _parse_rss_date(entry),
         "source": {"name": source_name},
     }
@@ -289,6 +314,10 @@ async def _fetch_feed(client: httpx.AsyncClient, source_name: str, url: str) -> 
                     logger.warning("RSS feed %s response too large (>=2MB), aborting", url)
                     raise ValueError("Response too large")
         # feedparser is synchronous but parses bytes quickly; offload to thread.
+        if b"<!ENTITY" in body.lower():
+            logger.warning("RSS feed %s rejected: XML entity declarations found", url)
+            _record_feed_failure(url)
+            return []
         parsed = await asyncio.to_thread(feedparser.parse, body)
         if parsed.bozo and not parsed.entries:
             logger.warning("RSS feed %s failed to parse: %s", url, parsed.get("bozo_exception"))
@@ -319,8 +348,9 @@ async def _fetch_feed_list(
         seen_urls.add(url)
         unique_feeds.append((name, url))
 
-    custom_ua = os.getenv("NEWSDROP_USER_AGENT")
-    ua = custom_ua or "Mozilla/5.0 (compatible; newsdrop-bot/1.0; +https://github.com/newsdrop)"
+    custom_ua = os.getenv("NEWSDROP_USER_AGENT", "")
+    default_ua = "Mozilla/5.0 (compatible; newsdrop-bot/1.0; +https://github.com/newsdrop)"
+    ua = (custom_ua.strip() if isinstance(custom_ua, str) else "") or default_ua
     headers = {"User-Agent": ua}
     async with httpx.AsyncClient(headers=headers, max_redirects=5, timeout=15.0) as client:
         tasks = [_fetch_feed(client, name, url) for name, url in unique_feeds]

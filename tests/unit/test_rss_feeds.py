@@ -44,7 +44,7 @@ class TestStripHtml:
 
     def test_handles_real_rss_summary(self):
         html = (
-            "<p>Scientists discover <a href=\"...\">new species</a> in the "
+            '<p>Scientists discover <a href="...">new species</a> in the '
             "<b>Amazon rainforest</b>.</p>"
         )
         result = rss_feeds._strip_html(html)

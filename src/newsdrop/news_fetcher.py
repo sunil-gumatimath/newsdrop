@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import random
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -66,7 +67,8 @@ CATEGORY_MAP = {
 logger = logging.getLogger(__name__)
 
 # Daily API request tracking for free-tier protection.
-_request_limit = DAILY_REQUEST_LIMIT if DAILY_REQUEST_LIMIT > 0 else 200
+# DAILY_REQUEST_LIMIT==0 disables local limiting (unlimited) per config comment.
+_request_limit = DAILY_REQUEST_LIMIT
 
 # Shared HTTP client for NewsData.io (connection reuse across fetches).
 _http_client: httpx.AsyncClient | None = None
@@ -217,8 +219,9 @@ def _normalize_article(article: Article) -> Article:
         "title": article.get("title") or "No title",
         "description": description,
         "content": content,
-        "url": article.get("link") or "",
-        "urlToImage": article.get("image_url") or "",
+        # Stored URLs are untrusted: validate before persisting downstream.
+        "url": _safe_url(article.get("link") or ""),
+        "urlToImage": _safe_url(article.get("image_url") or ""),
         "publishedAt": article.get("pubDate") or "",
         "category": category if isinstance(category, list) else [],
         "country": country if isinstance(country, list) else [],
@@ -245,7 +248,8 @@ async def _fetch_news(params: Params) -> NewsResponse:
     if isinstance(cached, dict):
         return cached
 
-    if not await api_budget_check(_request_limit):
+    # 0 means unlimited per config — skip budget gate.
+    if _request_limit != 0 and not await api_budget_check(_request_limit):
         current, limit = await get_request_count()
         raise APIClientError(
             f"Daily API request limit reached ({current}/{limit}). "
@@ -257,6 +261,10 @@ async def _fetch_news(params: Params) -> NewsResponse:
     max_attempts = 3
     last_exc: Exception | None = None
     client = await get_http_client()
+    # Consume the API budget once for the whole logical fetch attempt cycle
+    # (including retries), so a degraded-API window with retries cannot burn
+    # ~3x the free-tier spend. The budget gate above already reserved the
+    # request; commit the consumption here.
     for attempt in range(max_attempts):
         try:
             try:
@@ -271,7 +279,18 @@ async def _fetch_news(params: Params) -> NewsResponse:
                 ) from exc
 
             try:
-                # Enforce 2MB response size cap before parsing
+                # Enforce 2MB response size cap before parsing — check header
+                # first to avoid loading large body.
+                content_length = response.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        if int(str(content_length).strip()) >= 2_000_000:
+                            raise APIClientError(
+                                "⚠️ The news service returned an unexpectedly large response. "
+                                "Please try again later."
+                            )
+                    except (ValueError, TypeError):
+                        pass
                 if len(response.content) >= 2_000_000:
                     raise APIClientError(
                         "⚠️ The news service returned an unexpectedly large response. "
@@ -299,20 +318,28 @@ async def _fetch_news(params: Params) -> NewsResponse:
 
             normalized = _normalize_response(data)
             await cache_set(cache_key, normalized, CACHE_TTL_SECONDS)
-            await api_request_consume(_request_limit)
+            if _request_limit != 0:
+                await api_request_consume(_request_limit)
             return normalized
 
         except (APIClientError, RuntimeError) as exc:
             last_exc = exc
-            # Retry only on 5xx or transport errors. 4xx errors (auth, rate-limit)
-            # won't resolve with retry.
+            # Only retry on 500,502,503,504 and transport errors. 4xx (including 429) never retry.
             status = getattr(exc, "status_code", None)
-            if status is not None and 400 <= status < 500 and status != 429:
-                raise
+            if status is not None:
+                if 400 <= status < 500:
+                    break
+                if status not in (500, 502, 503, 504):
+                    break
+            else:
+                # No status code: retry only transport-level APIClientError,
+                # not RuntimeError/invalid JSON.
+                if isinstance(exc, RuntimeError):
+                    break
             if attempt < max_attempts - 1:
-                delay = 2**attempt  # 1s, 2s
+                delay = 2**attempt + random.uniform(0, 0.5)  # 1s, 2s + jitter
                 logger.warning(
-                    "NewsData.io fetch attempt %d/%d failed (%s). Retrying in %ds...",
+                    "NewsData.io fetch attempt %d/%d failed (%s). Retrying in %.2fs...",
                     attempt + 1,
                     max_attempts,
                     exc,
@@ -320,7 +347,17 @@ async def _fetch_news(params: Params) -> NewsResponse:
                 )
                 await asyncio.sleep(delay)
 
-    raise last_exc  # type: ignore[misc]
+    # Consume the budget exactly once per logical fetch attempt cycle — even
+    # when the API was degraded and every attempt failed — so retries cannot
+    # multiply free-tier spend.
+    if _request_limit != 0:
+        await api_request_consume(_request_limit)
+
+    if last_exc is not None:
+        raise last_exc
+    # Unreachable in practice (max_attempts >= 1 always raises on failure),
+    # but mypy needs an explicit terminal statement for the return type.
+    raise APIClientError("News fetch failed after retries.")
 
 
 def _merge_and_dedupe(*sources: list[Article], limit: int = 10) -> list[Article]:
@@ -403,6 +440,16 @@ def _term_pattern(term: str) -> re.Pattern[str]:
     escaped = re.escape(term.lower())
     # Word boundary: letters/digits on either side block the match.
     return re.compile(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", re.IGNORECASE)
+
+
+def _keyword_pattern(kw: str) -> re.Pattern[str]:
+    """Whole-word pattern for breaking keywords, supports multi-word phrases.
+
+    Uses the same lookaround logic as ``_term_pattern`` so phrases like
+    ``artificial intelligence`` only match as a complete phrase and do not
+    trigger on substrings.
+    """
+    return _term_pattern(kw.strip().lower())
 
 
 def _article_text_fields(article: Article) -> tuple[str, str]:
@@ -615,7 +662,8 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
         # Rate-limit gate: if the daily budget is gone, log once and bail out
         # of the whole country loop (do not "continue" — remaining countries
         # would just hit the same gate and spam the log).
-        if not await api_budget_check(_request_limit):
+        # 0 == unlimited, so skip gate entirely.
+        if _request_limit != 0 and not await api_budget_check(_request_limit):
             current, limit = await get_request_count()
             logger.warning(
                 "Breaking-news fetch skipped for %s: daily budget exhausted "
@@ -655,10 +703,8 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
             description = str(article.get("description", "")).lower()
             combined = f"{title} {description}"
 
-            matched = [
-                kw for kw in keywords if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
-            ]
-            title_hits = [kw for kw in matched if re.search(rf"\b{re.escape(kw.lower())}\b", title)]
+            matched = [kw for kw in keywords if _keyword_pattern(kw).search(combined)]
+            title_hits = [kw for kw in matched if _keyword_pattern(kw).search(title)]
             if title_hits or len(matched) >= 2:
                 tagged = dict(article)
                 tagged["country"] = country
@@ -674,10 +720,8 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
             description = str(article.get("description", "")).lower()
             combined = f"{title} {description}"
 
-            matched = [
-                kw for kw in keywords if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
-            ]
-            title_hits = [kw for kw in matched if re.search(rf"\b{re.escape(kw.lower())}\b", title)]
+            matched = [kw for kw in keywords if _keyword_pattern(kw).search(combined)]
+            title_hits = [kw for kw in matched if _keyword_pattern(kw).search(title)]
             if title_hits or len(matched) >= 2:
                 tagged = dict(article)
                 tagged["country"] = country
