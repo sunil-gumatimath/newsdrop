@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from telegram import InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import RetryAfter
 from telegram.ext import ContextTypes
 
 from ..config import (
@@ -19,15 +21,14 @@ from ..config import (
     DEFAULT_TIMEZONE,
 )
 from ..database import (
+    claim_breaking_alert_slot,
     cleanup_old_breaking_alerts,
     count_breaking_alerts_today,
     get_followed_topics,
     get_user_prefs,
     load_breaking_news_subscribers,
     load_subscribers,
-    mark_breaking_alert_sent,
     parse_breaking_keywords,
-    was_breaking_alert_sent,
 )
 from ..message_utils import chunk_message
 from ..metrics import (
@@ -40,8 +41,6 @@ from ..news_fetcher import (
     fetch_breaking_news,
     fetch_top_headlines,
 )
-from telegram import InlineKeyboardMarkup
-
 from .helpers import (
     _build_digest_payload,
     _get_article_key,
@@ -128,6 +127,11 @@ def resolve_alert_keywords(
     return keywords
 
 
+def _keyword_pattern(kw: str) -> re.Pattern[str]:
+    """Whole-word pattern for breaking keywords, supports multi-word phrases."""
+    return re.compile(rf"(?<![a-z0-9]){re.escape(kw.strip().lower())}(?![a-z0-9])", re.IGNORECASE)
+
+
 def matching_alert_keywords(article: dict, keywords: list[str]) -> list[str]:
     """Return keywords that trigger an alert for this article (quieter rules).
 
@@ -139,12 +143,10 @@ def matching_alert_keywords(article: dict, keywords: list[str]) -> list[str]:
     title = str(article.get("title", "")).lower()
     description = str(article.get("description", "")).lower()
     combined = f"{title} {description}"
-    matched = [
-        kw for kw in keywords if re.search(rf"\b{re.escape(kw.lower())}\b", combined)
-    ]
+    matched = [kw for kw in keywords if _keyword_pattern(kw).search(combined)]
     if not matched:
         return []
-    title_hits = [kw for kw in matched if re.search(rf"\b{re.escape(kw.lower())}\b", title)]
+    title_hits = [kw for kw in matched if _keyword_pattern(kw).search(title)]
     if title_hits:
         return title_hits
     if len(matched) >= 2:
@@ -233,23 +235,22 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
             if not matched_kws:
                 continue
 
-            already = per_user_sent.get(chat_id, 0)
-            if already >= BREAKING_ALERT_MAX_PER_DAY:
-                continue
-
-            # Include alerts already sent earlier today toward the cap.
-            if chat_id not in per_user_sent:
-                prior = await count_breaking_alerts_today(chat_id)
-                per_user_sent[chat_id] = prior
-                if prior >= BREAKING_ALERT_MAX_PER_DAY:
-                    continue
-
-            if await was_breaking_alert_sent(chat_id, article_key):
-                continue
-
             title = str(article.get("title", ""))
             url = _safe_url(article.get("url", ""))
-            next_count = per_user_sent.get(chat_id, 0) + 1
+
+            # Atomic cap + dedupe gate: claim the slot BEFORE sending. The
+            # claim counts today's rows inside the same transaction as the
+            # dedupe insert, so neither the daily cap nor duplicate sends can
+            # be raced by overlapping job runs / concurrent workers.
+            if not await claim_breaking_alert_slot(
+                chat_id,
+                article_key,
+                url,
+                title,
+                max_per_day=BREAKING_ALERT_MAX_PER_DAY,
+            ):
+                continue
+            next_count = await count_breaking_alerts_today(chat_id)
 
             try:
                 text, markup = format_breaking_alert(
@@ -266,11 +267,29 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
                 }
                 if isinstance(markup, InlineKeyboardMarkup):
                     send_kwargs["reply_markup"] = markup
-                await context.bot.send_message(**send_kwargs)
-                if await mark_breaking_alert_sent(chat_id, article_key, url, title):
-                    sent_count += 1
-                    per_user_sent[chat_id] = next_count
-                    await increment(BREAKING_ALERTS_SENT)
+                try:
+                    await context.bot.send_message(**send_kwargs)
+                except RetryAfter as exc:
+                    # Telegram flood control: back off for the requested
+                    # duration, then retry exactly once. Retrying cannot
+                    # cause duplicates because the mark-first gate above
+                    # already claimed this (chat_id, article_key) slot.
+                    logger.warning(
+                        "Rate limited sending breaking alert to %s, retrying once after %s s: %s",
+                        chat_id,
+                        exc.retry_after,
+                        exc,
+                    )
+                    # PTB types retry_after as ``int | timedelta``.
+                    if isinstance(exc.retry_after, timedelta):
+                        delay = exc.retry_after.total_seconds()
+                    else:
+                        delay = float(exc.retry_after)
+                    await asyncio.sleep(max(delay, 0.0))
+                    await context.bot.send_message(**send_kwargs)
+                sent_count += 1
+                per_user_sent[chat_id] = next_count
+                await increment(BREAKING_ALERTS_SENT)
             except Exception as exc:
                 logger.exception(
                     "Failed to send breaking alert to %s: %s",
@@ -286,8 +305,15 @@ async def _send_combo(
     grouped: dict[tuple[str, str], list[int]],
     semaphore: asyncio.Semaphore,
 ) -> None:
-    """Fetch once per (country, category) combo and send to all subscribers in that group."""
-    for (country, category), chat_ids in grouped.items():
+    """Fetch once per (country, category) combo and send to all subscribers in that group.
+
+    Parallelized with semaphore-gated concurrency: each combo runs as a
+    separate task and acquires the semaphore only for its fetch+send work.
+    The previous sequential ``for combo: async with semaphore`` never
+    overlapped fetches.
+    """
+
+    async def _send_one(country: str, category: str, chat_ids: list[int]) -> None:
         async with semaphore:
             try:
                 data = await fetch_top_headlines(country, category)
@@ -299,10 +325,10 @@ async def _send_combo(
                             chat_id=chat_id,
                             text="⚠️ Could not fetch today's news. Please try again later.",
                         )
-                continue
+                return
             except Exception as exc:
                 logger.exception("Unexpected error fetching %s/%s: %s", country, category, exc)
-                continue
+                return
 
             # Build a digest per user (followed topics differ per user).
             # But reuse the fetched `data` across the whole group.
@@ -352,6 +378,13 @@ async def _send_combo(
 
                 except Exception as exc:
                     logger.exception("Failed to send news to %s: %s", chat_id, exc)
+
+    tasks = [
+        asyncio.create_task(_send_one(country, category, chat_ids))
+        for (country, category), chat_ids in grouped.items()
+    ]
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:

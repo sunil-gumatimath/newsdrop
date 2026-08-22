@@ -288,10 +288,7 @@ async def test_send_breaking_news_sends_alerts(tmp_db):
         ),
         patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch,
         patch(
-            "newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=False
-        ),
-        patch(
-            "newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock, return_value=True
+            "newsdrop.bot.jobs.claim_breaking_alert_slot", new_callable=AsyncMock, return_value=True
         ),
         patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock),
         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
@@ -313,7 +310,7 @@ async def test_send_breaking_news_sends_alerts(tmp_db):
 
 @pytest.mark.asyncio
 async def test_send_breaking_news_skips_already_sent(tmp_db):
-    """Articles already sent to a user are not re-delivered."""
+    """Articles the dedupe gate reports as already sent are not re-delivered."""
     context = _make_context()
 
     articles = _make_articles(2, prefix="breaking")
@@ -333,22 +330,25 @@ async def test_send_breaking_news_skips_already_sent(tmp_db):
             return_value=0,
         ),
         patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch,
+        # Atomic claim gate: claim returns False → slot already claimed /
+        # cap reached → skip sending.
         patch(
-            "newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=True
-        ),
-        patch("newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock) as mock_mark,
+            "newsdrop.bot.jobs.claim_breaking_alert_slot", new_callable=AsyncMock
+        ) as mock_mark,
         patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock),
         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
     ):
+        mock_mark.return_value = False
         mock_load.return_value = {100}
         mock_prefs.side_effect = fake_get_prefs
         mock_fetch.return_value = articles
 
         await jobs.send_breaking_news_alerts(context)
 
-    # No messages sent because all articles were already delivered
+    # No messages sent because every article was already claimed as delivered
     context.bot.send_message.assert_not_awaited()
-    mock_mark.assert_not_awaited()
+    # The gate was consulted once per (article, subscriber) candidate.
+    assert mock_mark.await_count == len(articles)
 
 
 @pytest.mark.asyncio
@@ -414,10 +414,7 @@ async def test_send_breaking_news_groups_by_country(tmp_db):
         ),
         patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch,
         patch(
-            "newsdrop.bot.jobs.was_breaking_alert_sent", new_callable=AsyncMock, return_value=False
-        ),
-        patch(
-            "newsdrop.bot.jobs.mark_breaking_alert_sent", new_callable=AsyncMock, return_value=True
+            "newsdrop.bot.jobs.claim_breaking_alert_slot", new_callable=AsyncMock, return_value=True
         ),
         patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock),
         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
