@@ -33,7 +33,6 @@ _feed_disabled_until: dict[str, float] = {}
 #   (source_display_name, url)
 RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
     "world": [
-        ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
         ("The Guardian World", "https://www.theguardian.com/world/rss"),
         ("Reuters", "https://openrss.org/feed/www.reuters.com"),
         ("Associated Press", "https://openrss.org/feed/apnews.com"),
@@ -49,11 +48,9 @@ RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
         ("Hindustan Times", "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml"),
         ("Deccan Herald", "https://www.deccanherald.com/stories.rss"),
         ("The Quint", "https://www.thequint.com/feed"),
-        ("BBC News India", "https://feeds.bbci.co.uk/news/world/asia/india/rss.xml"),
     ],
     "us": [
         ("NPR", "https://feeds.npr.org/1001/rss.xml"),
-        ("BBC (US & Canada)", "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml"),
         ("NYT World", "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"),
         ("Reuters", "https://openrss.org/feed/www.reuters.com"),
         ("Associated Press", "https://openrss.org/feed/apnews.com"),
@@ -61,7 +58,6 @@ RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
         ("Bloomberg", "https://openrss.org/feed/www.bloomberg.com"),
     ],
     "gb": [
-        ("BBC News", "https://feeds.bbci.co.uk/news/uk/rss.xml"),
         ("The Guardian", "https://www.theguardian.com/uk/rss"),
         ("Sky News", "https://feeds.skynews.com/feeds/rss/uk.xml"),
     ],
@@ -83,7 +79,6 @@ RSS_FEEDS: dict[str, list[tuple[str, str]]] = {
 # we don't have to rely on brittle keyword filtering of general headlines.
 RSS_CATEGORY_FEEDS: dict[str, list[tuple[str, str]]] = {
     "technology": [
-        ("BBC Technology", "https://feeds.bbci.co.uk/news/technology/rss.xml"),
         ("The Verge", "https://www.theverge.com/rss/index.xml"),
         ("Ars Technica", "https://feeds.arstechnica.com/arstechnica/index"),
         ("Wired", "https://www.wired.com/feed/rss"),
@@ -91,7 +86,6 @@ RSS_CATEGORY_FEEDS: dict[str, list[tuple[str, str]]] = {
         ("NPR Technology", "https://feeds.npr.org/1019/rss.xml"),
     ],
     "business": [
-        ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
         (
             "CNBC",
             "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147",
@@ -102,26 +96,22 @@ RSS_CATEGORY_FEEDS: dict[str, list[tuple[str, str]]] = {
         ("News on AIR Business", "https://newsonair.gov.in/category/business/feed/"),
     ],
     "sports": [
-        ("BBC Sport", "https://feeds.bbci.co.uk/sport/rss.xml"),
         ("ESPN", "https://www.espn.com/espn/rss/news"),
         ("The Guardian Sport", "https://www.theguardian.com/uk/sport/rss"),
         ("NPR Sports", "https://feeds.npr.org/1055/rss.xml"),
         ("News on AIR Sports", "https://newsonair.gov.in/category/sports/feed/"),
     ],
     "entertainment": [
-        ("BBC Entertainment", "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml"),
         ("Variety", "https://variety.com/feed/"),
         ("The Guardian Culture", "https://www.theguardian.com/uk/culture/rss"),
         ("NPR Movies", "https://feeds.npr.org/1045/rss.xml"),
     ],
     "health": [
-        ("BBC Health", "https://feeds.bbci.co.uk/news/health/rss.xml"),
         ("NPR Health", "https://feeds.npr.org/1128/rss.xml"),
         ("The Guardian Society", "https://www.theguardian.com/society/rss"),
         ("WHO News", "https://www.who.int/rss-feeds/news-english.xml"),
     ],
     "science": [
-        ("BBC Science", "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"),
         ("NASA", "https://www.nasa.gov/rss/dyn/breaking_news.rss"),
         ("ScienceDaily", "https://www.sciencedaily.com/rss/all.xml"),
         ("NPR Science", "https://feeds.npr.org/1007/rss.xml"),

@@ -16,7 +16,7 @@ from newsdrop.story_ranker import (
 class TestSourceTrust:
     def test_known_outlet_scores_high(self):
         assert source_trust("Reuters") >= 0.95
-        assert source_trust("BBC News") >= 0.9
+        assert source_trust("The Guardian") >= 0.9
 
     def test_unknown_outlet_gets_default(self):
         assert source_trust("Random Blog XYZ") == 0.5

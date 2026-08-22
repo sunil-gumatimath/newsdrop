@@ -33,7 +33,6 @@ SOURCE_TRUST: dict[str, float] = {
     "reuters": 1.0,
     "associated press": 1.0,
     "ap news": 1.0,
-    "bbc": 0.95,
     "the guardian": 0.9,
     "guardian": 0.9,
     "new york times": 0.9,

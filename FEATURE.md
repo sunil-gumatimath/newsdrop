@@ -61,7 +61,7 @@ Bot menu (Telegram command list) includes: start, news, subscribe, search, follo
 ### Aggregation & ranking
 - NewsData.io + country/category RSS
 - Story clustering (near-duplicate titles/URLs)
-- Source trust weights (e.g. Reuters, AP, BBC)
+- Source trust weights (e.g. Reuters, AP, The Guardian)
 - Shared API client, cache, and daily request budget
 
 ## Regions & categories
