@@ -162,6 +162,8 @@ _OWNED_CALLBACK_ACTIONS = frozenset(
         "breakfollows",
         "dailyhour",
         "tz",
+        "freq",
+        "freqday",
         "follow",
         "unfollow",
     }
@@ -197,9 +199,7 @@ def _extract_ownership_user_id(update: Update, action: str) -> int | None:
 
 async def _handle_obnews_callback(query: CallbackQuery, chat_id: int) -> None:
     """Finish onboarding by sending a live briefing in-place."""
-    if not await rate_limit_try_acquire(
-        NEWS_RATE_LIMIT_SCOPE, chat_id, _NEWS_COOLDOWN_SECONDS
-    ):
+    if not await rate_limit_try_acquire(NEWS_RATE_LIMIT_SCOPE, chat_id, _NEWS_COOLDOWN_SECONDS):
         await increment(COMMAND_NEWS)
         _ = await query.answer(
             f"⏳ Please wait {_NEWS_COOLDOWN_SECONDS}s before requesting news again.",
@@ -304,6 +304,94 @@ async def _handle_dailyhour_callback(query: CallbackQuery, chat_id: int, value: 
     await set_user_prefs(chat_id, daily_hour=hour)
     _ = await query.edit_message_text(
         f"✅ Daily digest hour set to <b>{hour:02d}:00</b> (your timezone).",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _handle_freq_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
+    from ..config import DAILY_FREQUENCY_CHOICES
+    from ..database import parse_digest_days
+    from .helpers import custom_days_keyboard, digest_frequency_keyboard
+
+    freq = value.strip().lower()
+    if freq not in set(DAILY_FREQUENCY_CHOICES):
+        _ = await query.edit_message_text("⚠️ Invalid frequency.")
+        return
+    if freq == "custom":
+        # Show day picker; keep current selection if any.
+        from ..config import DEFAULT_COUNTRY as _DC
+        from ..database import get_user_prefs as _get_prefs
+
+        prefs = await _get_prefs(chat_id, _DC)
+        selected = parse_digest_days(prefs.get("digest_days", "") or "")
+        _ = await query.edit_message_text(
+            "📅 <b>Custom days</b>\n\nPick days for your digest (Mon=0 … Sun=6).\n"  # noqa: E501
+            "Tap to toggle, then Done.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=custom_days_keyboard(selected),
+        )
+        return
+    # Non-custom: set frequency and clear days if not custom.
+    await set_user_prefs(
+        chat_id, digest_frequency=freq, digest_days="" if freq != "custom" else None
+    )
+    # For backwards compat when digest_days None not passed, ensure cleared for non-custom.
+    if freq != "custom":
+        # already cleared via "" above
+        pass
+    _ = await query.edit_message_text(
+        f"✅ Digest frequency set to <b>{_escape_html(freq)}</b>.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=digest_frequency_keyboard(freq),
+    )
+
+
+async def _handle_freqday_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
+    from ..database import get_user_prefs as _get_prefs
+    from ..database import parse_digest_days, serialize_digest_days
+    from .helpers import custom_days_keyboard
+
+    prefs = await _get_prefs(chat_id, "us")
+    selected = parse_digest_days(prefs.get("digest_days", "") or "")
+    try:
+        idx = int(value.strip())
+    except ValueError:
+        _ = await query.edit_message_text("⚠️ Invalid day.")
+        return
+    if not (0 <= idx <= 6):
+        _ = await query.edit_message_text("⚠️ Invalid day.")
+        return
+    if idx in selected:
+        selected = [d for d in selected if d != idx]
+    else:
+        selected.append(idx)
+        selected.sort()
+    await set_user_prefs(
+        chat_id, digest_frequency="custom", digest_days=serialize_digest_days(selected)
+    )
+    _ = await query.edit_message_text(
+        "📅 <b>Custom days</b>\n\nPick days for your digest.\nTap to toggle, then Done.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=custom_days_keyboard(selected),
+    )
+
+
+async def _handle_freqdays_done_callback(query: CallbackQuery, chat_id: int) -> None:
+    from ..config import WEEKDAY_LABELS
+    from ..database import get_user_prefs as _get_prefs
+    from ..database import parse_digest_days
+
+    prefs = await _get_prefs(chat_id, "us")
+    selected = parse_digest_days(prefs.get("digest_days", "") or "")
+    if not selected:
+        _ = await query.edit_message_text(
+            "⚠️ Pick at least one day, or choose another frequency with /setfreq.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    labels = ", ".join(WEEKDAY_LABELS[i] for i in selected)
+    _ = await query.edit_message_text(
+        f"✅ Custom digest days set to <b>{_escape_html(labels)}</b>.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -562,6 +650,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _handle_dailyhour_callback(query, chat_id, value)
     elif action == "tz":
         await _handle_tz_callback(query, chat_id, value)
+    elif action == "freq":
+        await _handle_freq_callback(query, chat_id, value)
+    elif action == "freqday":
+        await _handle_freqday_callback(query, chat_id, value)
+    elif action == "freqdays":
+        await _handle_freqdays_done_callback(query, chat_id)
     elif action == "search":
         await _handle_search_callback(query, chat_id, value)
     elif action == "follow":

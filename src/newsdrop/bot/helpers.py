@@ -21,6 +21,9 @@ from ..config import (
     ADMIN_CHAT_IDS,
     CATEGORIES,
     COUNTRIES,
+    DAILY_FREQUENCY_CHOICES,
+    DAILY_FREQUENCY_LABELS,
+    WEEKDAY_LABELS,
 )
 from ..config import (
     NEWS_COOLDOWN_SECONDS as _NEWS_COOLDOWN_SECONDS,
@@ -508,9 +511,7 @@ def _empty_digest_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def country_keyboard(
-    onboarding: bool = False, user_id: int | None = None
-) -> InlineKeyboardMarkup:
+def country_keyboard(onboarding: bool = False, user_id: int | None = None) -> InlineKeyboardMarkup:
     prefix = "obcountry" if onboarding else "country"
     suffix = f":{user_id}" if user_id is not None else ""
     return InlineKeyboardMarkup(
@@ -521,9 +522,7 @@ def country_keyboard(
     )
 
 
-def category_keyboard(
-    onboarding: bool = False, user_id: int | None = None
-) -> InlineKeyboardMarkup:
+def category_keyboard(onboarding: bool = False, user_id: int | None = None) -> InlineKeyboardMarkup:
     prefix = "obcategory" if onboarding else "category"
     suffix = f":{user_id}" if user_id is not None else ""
     # Two columns for a denser mobile layout.
@@ -547,6 +546,54 @@ def onboarding_finish_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def digest_frequency_keyboard(current: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for freq in DAILY_FREQUENCY_CHOICES:
+        label = DAILY_FREQUENCY_LABELS.get(freq, freq.capitalize())
+        check = " ✓" if freq == current else ""
+        rows.append([InlineKeyboardButton(f"{label}{check}", callback_data=f"freq:{freq}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def custom_days_keyboard(selected: list[int] | None = None) -> InlineKeyboardMarkup:
+    sel = set(selected or [])
+    rows: list[list[InlineKeyboardButton]] = []
+    # 4 + 3 layout for 7 days
+    for start in (0, 4):
+        chunk = range(start, min(start + 4, 7))
+        row = []
+        for idx in chunk:
+            label = WEEKDAY_LABELS[idx]
+            check = "✅ " if idx in sel else ""
+            row.append(InlineKeyboardButton(f"{check}{label}", callback_data=f"freqday:{idx}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("✅ Done", callback_data="freqdays:done")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data="freq:custom")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _format_digest_frequency(prefs: dict[str, str]) -> str:
+    freq = str(prefs.get("digest_frequency") or "daily").strip().lower()
+    label = DAILY_FREQUENCY_LABELS.get(freq, freq.capitalize())
+    if freq == "twice":
+        return f"{label} (08:00 & 20:00)"
+    if freq == "custom":
+        raw = prefs.get("digest_days", "") or ""
+        parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+        days: list[str] = []
+        for p in parts:
+            try:
+                n = int(p)
+                if 0 <= n <= 6:
+                    days.append(WEEKDAY_LABELS[n])
+            except ValueError:
+                continue
+        if days:
+            return f"{label} ({', '.join(days)})"
+        return f"{label} (no days set)"
+    return label
 
 
 def _build_digest_payload(
@@ -751,6 +798,151 @@ def _format_news_digest(
     footer_bits.append("buttons below open full articles")
     lines.append("💡 " + "  ·  ".join(footer_bits))
     return "\n".join(lines)
+
+
+def build_export_html(
+    data: NewsResponse,
+    category: str,
+    country: str,
+    followed_topics: list[str] | None = None,
+) -> str:
+    """Generate a self-contained HTML digest for /export.
+
+    Reuses ``_personalize_articles`` so followed topics float first and
+    why-tags are consistent with the Telegram digest.  Returns a complete
+    HTML5 document (``<!DOCTYPE html>`` …) suitable for saving as ``.html``
+    and sharing / printing.
+
+    No new DB — pure formatting over the ``NewsResponse`` that ``/news``
+    and ``send_daily_news`` already build.
+    """
+    articles = _get_articles(data)
+    cat_label = _category_label(category)
+    region = _country_display(country)
+    sources = data.get("sources", []) if isinstance(data, dict) else []
+    personalized = _personalize_articles(articles, followed_topics) if articles else []
+    shown = personalized[:10]
+    now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    title_escaped = _escape_html(f"Newsdrop — {cat_label} · {region} — {now_str}")
+
+    css = (
+        "*{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"
+        "Helvetica,Arial,sans-serif;margin:0;background:#0f172a;color:#e2e8f0;line-height:1.6}"
+        "header{background:#1e293b;padding:28px 24px;border-bottom:1px solid #334155}"
+        "header h1{margin:0 0 6px;font-size:22px}header p{margin:0;color:#94a3b8;font-size:14px}"
+        ".wrap{max-width:860px;margin:0 auto;padding:24px}"
+        ".card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:18px 20px;margin:14px 0}"  # noqa: E501
+        ".card h2{margin:0 0 8px;font-size:17px;line-height:1.35}"
+        ".card h2 a{color:#38bdf8;text-decoration:none}.card h2 a:hover{text-decoration:underline}"
+        ".blurb{color:#cbd5e1;font-size:14px;margin:0 0 10px}"
+        ".meta{color:#94a3b8;font-size:12px} .tags{margin-top:8px;font-size:12px;color:#fbbf24}"
+        ".empty{background:#1e293b;border:1px dashed #475569;border-radius:12px;padding:28px;text-align:center;color:#94a3b8}"  # noqa: E501
+        "footer{color:#64748b;font-size:12px;text-align:center;padding:18px 0 28px}"
+        ".badge{display:inline-block;background:#334155;color:#e2e8f0;border-radius:999px;padding:2px 8px;font-size:11px;margin-right:6px}"  # noqa: E501
+    )
+
+    parts: list[str] = []
+    parts.append("<!DOCTYPE html>")
+    parts.append('<html lang="en">')
+    parts.append("<head>")
+    parts.append('<meta charset="utf-8">')
+    parts.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    parts.append(f"<title>{title_escaped}</title>")
+    parts.append(f"<style>{css}</style>")
+    parts.append("</head>")
+    parts.append("<body>")
+    parts.append('<header><div class="wrap">')
+    parts.append("<h1>📰 News Briefing</h1>")
+    header_meta = f"{_escape_html(cat_label)} &middot; {_escape_html(region)} &middot; {now_str}"
+    if sources and isinstance(sources, list):
+        labels: list[str] = []
+        for s in sources:
+            if s == "newsdata.io":
+                labels.append("NewsData.io")
+            elif s == "rss":
+                labels.append("RSS")
+            else:
+                labels.append(_escape_html(str(s)))
+        if labels:
+            header_meta += f" &middot; {' + '.join(labels)}"
+    parts.append(f"<p>{header_meta}</p>")
+    if shown and any(a.get("matchedTopics") for a in shown):
+        follow_count = sum(1 for a in shown if a.get("matchedTopics"))
+        parts.append(f"<p>📌 {follow_count} match your follows (shown first)</p>")
+    parts.append("</div></header>")
+    parts.append('<main class="wrap">')
+
+    if not shown:
+        parts.append('<div class="empty">')
+        parts.append('<h2 style="margin:0 0 8px;color:#e2e8f0">No stories found</h2>')
+        parts.append(f"<p>{_escape_html(cat_label)} &middot; {_escape_html(region)}</p>")
+        parts.append("<p>Nothing matched this combo right now. Try another region or category.</p>")
+        parts.append("</div>")
+    else:
+        parts.append(
+            f'<p style="color:#94a3b8;font-size:13px">{len(shown)} stor{"y" if len(shown) == 1 else "ies"}</p>'  # noqa: E501
+        )
+        for i, article in enumerate(shown, 1):
+            title = _escape_html(article.get("title", "No title"))
+            url = _safe_url(article.get("url", ""))
+            blurb = _article_blurb(article, max_length=220)
+            rel_time = _format_relative_time(str(article.get("publishedAt", "")))
+            _, source_escaped = _get_source_name(article)
+            why = article.get("whyTags") or []
+            tags_html = ""
+            if isinstance(why, list) and why:
+                tags_html = " ".join(
+                    f'<span class="badge">{_escape_html(str(t))}</span>' for t in why if t
+                )
+            related = article.get("relatedSources") or []
+            also_html = ""
+            if isinstance(related, list) and related:
+                also = " · ".join(_escape_html(str(s)) for s in related[:3] if s)
+                if also:
+                    also_html = f" &middot; also {also}"
+            elif article.get("clusterSize"):
+                try:
+                    cs = int(article.get("clusterSize", 1) or 1)
+                    if cs > 1:
+                        also_html = f" &middot; {cs} sources"
+                except (TypeError, ValueError):
+                    pass
+
+            parts.append('<article class="card">')
+            if url:
+                escaped_url = html.escape(url, quote=True)
+                parts.append(f'<h2>{i}. <a href="{escaped_url}">{title}</a></h2>')
+            else:
+                parts.append(f"<h2>{i}. {title}</h2>")
+            if blurb:
+                parts.append(f'<p class="blurb">{_escape_html(blurb)}</p>')
+            else:
+                parts.append('<p class="blurb"><em>Tap the title to read the full story.</em></p>')
+            meta_bits: list[str] = []
+            if rel_time:
+                meta_bits.append(f"⏱ {_escape_html(rel_time)}")
+            meta_bits.append(f"📍 {source_escaped}{also_html}")
+            parts.append(f'<div class="meta">{" &nbsp;·&nbsp; ".join(meta_bits)}</div>')
+            if tags_html:
+                parts.append(f'<div class="tags">{tags_html}</div>')
+            matched = article.get("matchedTopics") or []
+            if isinstance(matched, list) and matched:
+                m = " ".join(
+                    f'<span class="badge">#{_escape_html(str(x))}</span>' for x in matched[:3]
+                )
+                parts.append(f'<div class="tags">{m}</div>')
+            if url:
+                parts.append(
+                    f'<p style="margin:10px 0 0"><a href="{escaped_url}" style="color:#38bdf8;font-size:13px">Read full story →</a></p>'  # noqa: E501
+                )
+            parts.append("</article>")
+
+    parts.append("</main>")
+    parts.append(
+        f"<footer>Generated by newsdrop · {now_str} · {len(shown)} stor{'y' if len(shown) == 1 else 'ies'} · share this file to forward your briefing</footer>"  # noqa: E501
+    )
+    parts.append("</body></html>")
+    return "\n".join(parts)
 
 
 async def _send_trending_results(

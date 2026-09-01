@@ -57,16 +57,57 @@ def _safe_zoneinfo(name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+def _parse_digest_days_str(raw: str) -> list[int]:
+    seen: set[int] = set()
+    out: list[int] = []
+    for part in (raw or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            n = int(part)
+        except ValueError:
+            continue
+        if 0 <= n <= 6 and n not in seen:
+            seen.add(n)
+            out.append(n)
+    out.sort()
+    return out
+
+
 def is_digest_due(prefs: dict[str, str], now: datetime | None = None) -> bool:
-    """Return True if the user's local hour matches their preferred daily hour."""
+    """Return True if the user's local hour/day matches their digest schedule."""
     now = now or datetime.now(UTC)
     tz = _safe_zoneinfo(prefs.get("timezone") or DEFAULT_TIMEZONE)
     local = now.astimezone(tz)
+    freq = str(prefs.get("digest_frequency") or "daily").strip().lower()
+    if freq not in {"daily", "twice", "weekdays", "custom"}:
+        freq = "daily"
     try:
         preferred_hour = int(prefs.get("daily_hour") or DEFAULT_DAILY_HOUR)
     except ValueError:
         preferred_hour = DEFAULT_DAILY_HOUR
     preferred_hour = max(0, min(23, preferred_hour))
+
+    if freq == "twice":
+        # Spec: twice = 8am + 8pm local.
+        return local.hour in (8, 20)
+
+    if freq == "weekdays":
+        # Mon-Fri only (weekday 0-4).
+        if local.weekday() >= 5:
+            return False
+        return local.hour == preferred_hour
+
+    if freq == "custom":
+        days = _parse_digest_days_str(prefs.get("digest_days", "") or "")
+        if not days:
+            # No days configured → fall back to daily so user still gets digests.
+            return local.hour == preferred_hour
+        if local.weekday() not in days:
+            return False
+        return local.hour == preferred_hour
+
     return local.hour == preferred_hour
 
 

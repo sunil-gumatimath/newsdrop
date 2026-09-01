@@ -26,6 +26,7 @@ from .commands import (
     breaking_toggle,
     breakkeywords,
     clear_chat,
+    export_briefing,
     follow_topic,
     health,
     help_command,
@@ -36,6 +37,7 @@ from .commands import (
     search,
     set_category,
     set_country,
+    set_freq,
     set_time,
     set_timezone,
     start,
@@ -60,11 +62,13 @@ async def _setup_commands(
     commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("news", "Get latest news briefing"),
+        BotCommand("export", "Export briefing as HTML"),
         BotCommand("subscribe", "Enable daily news delivery"),
         BotCommand("search", "Search news by topic"),
         BotCommand("follow", "Follow a topic"),
         BotCommand("setcountry", "Choose news region"),
         BotCommand("setcategory", "Choose news category"),
+        BotCommand("setfreq", "Set digest frequency"),
         BotCommand("settime", "Set daily digest hour"),
         BotCommand("settimezone", "Set your timezone"),
         BotCommand("breaking", "Breaking news alerts"),
@@ -156,6 +160,7 @@ def main() -> None:
     app.add_handler(CommandHandler("setcategory", set_category))
     app.add_handler(CommandHandler("settime", set_time))
     app.add_handler(CommandHandler("settimezone", set_timezone))
+    app.add_handler(CommandHandler("setfreq", set_freq))
     app.add_handler(CommandHandler("quiet", quiet_hours))
     app.add_handler(CommandHandler("breakkeywords", breakkeywords))
     app.add_handler(CommandHandler("subscribe", subscribe))
@@ -165,6 +170,7 @@ def main() -> None:
     app.add_handler(CommandHandler("trending", trending))
     app.add_handler(CommandHandler("health", health))
     app.add_handler(CommandHandler("clear", clear_chat))
+    app.add_handler(CommandHandler("export", export_briefing))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", help_command))
     app.add_handler(CallbackQueryHandler(button_handler))

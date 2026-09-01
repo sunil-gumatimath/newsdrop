@@ -73,6 +73,7 @@ from .helpers import (
     _resolve_trending_category,
     _sanitize_follow_topic,
     _send_trending_results,
+    build_export_html,
     build_search_payload,
     is_admin_chat,
     logger,
@@ -465,12 +466,15 @@ async def preferences(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
         quiet_label = f"{quiet_start}:00–{quiet_end}:00"
     else:
         quiet_label = "off"
+    # Frequency display
+    from .helpers import _format_digest_frequency
 
+    freq_label = _format_digest_frequency(prefs)
     text = (
         "⚙️ <b>Your Preferences</b>\n\n"
         f"🌍 Region: {_escape_html(country_name)}\n"
         f"📂 Category: {_escape_html(category.capitalize())}\n"
-        f"🕒 Digest: {_escape_html(hour)}:00 ({_escape_html(tz)})\n"
+        f"🕒 Digest: {_escape_html(hour)}:00 ({_escape_html(tz)}) — {_escape_html(freq_label)}\n"
         f"🌙 Quiet hours: {_escape_html(quiet_label)}\n"
         f"🏷️ Followed topics: {len(followed_topics)}\n"
         f"{breaking_emoji} Breaking news: <b>{breaking_label}</b>\n"
@@ -478,7 +482,7 @@ async def preferences(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
         f"   · Custom keywords: {len(custom_kw)}"
         f"{(' — ' + _escape_html(', '.join(custom_kw))) if custom_kw else ''}\n"
         f"   · Max {BREAKING_ALERT_MAX_PER_DAY}/day\n\n"
-        "/setcountry · /setcategory · /settime · /settimezone\n"
+        "/setcountry · /setcategory · /settime · /settimezone · /setfreq\n"
         "/quiet · /breaking · /breakkeywords · /follows"
     )
     _ = await message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -547,6 +551,102 @@ async def set_time(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         "Pick a local hour for your daily briefing:",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def set_freq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Configure digest frequency: /setfreq [daily|twice|weekdays|custom]."""
+    message = update.effective_message
+    chat_id = _effective_chat_id(update)
+    if not message or chat_id is None:
+        return
+    from ..config import DAILY_FREQUENCY_CHOICES
+    from ..database import parse_digest_days, serialize_digest_days
+    from .helpers import custom_days_keyboard, digest_frequency_keyboard
+
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    if args:
+        raw = args[0].lower()
+        # Allow shorthand: 2x -> twice, weekday -> weekdays
+        aliases = {"2x": "twice", "weekday": "weekdays", "weekly": "weekdays"}
+        raw = aliases.get(raw, raw)
+        if raw in set(DAILY_FREQUENCY_CHOICES):
+            if raw == "custom":
+                # Optional days list: /setfreq custom 0,1,2  or "mon tue"
+                rest = " ".join(args[1:]).strip()
+                if rest:
+                    # Parse ints and weekday names
+                    name_to_idx = {
+                        "mon": 0,
+                        "tue": 1,
+                        "wed": 2,
+                        "thu": 3,
+                        "fri": 4,
+                        "sat": 5,
+                        "sun": 6,
+                    }
+                    days: list[int] = []
+                    for tok in rest.replace(",", " ").split():
+                        tok_l = tok.lower().strip()
+                        if tok_l.isdigit():
+                            try:
+                                n = int(tok_l)
+                                if 0 <= n <= 6:
+                                    days.append(n)
+                            except ValueError:
+                                continue
+                        elif tok_l[:3] in name_to_idx:
+                            days.append(name_to_idx[tok_l[:3]])
+                    if days:
+                        await set_user_prefs(
+                            chat_id,
+                            digest_frequency="custom",
+                            digest_days=serialize_digest_days(days),
+                        )
+                        _ = await message.reply_text(
+                            f"✅ Digest frequency set to <b>custom</b> "  # noqa: E501
+                            f"({', '.join(str(d) for d in sorted(set(days)))})",
+                            parse_mode=ParseMode.HTML,
+                        )
+                        return
+                # No days supplied → show picker
+                prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+                selected = parse_digest_days(prefs.get("digest_days", "") or "")
+                _ = await message.reply_text(
+                    "📅 <b>Custom days</b>\n\nPick days for your digest. Tap to toggle, then Done.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=custom_days_keyboard(selected),
+                )
+                return
+            await set_user_prefs(chat_id, digest_frequency=raw, digest_days="")
+            _ = await message.reply_text(
+                f"✅ Digest frequency set to <b>{_escape_html(raw)}</b>.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        _ = await message.reply_text(
+            "⚠️ Unknown frequency. Choose: daily, twice, weekdays, custom.\n"
+            "Example: <code>/setfreq weekdays</code> or just <code>/setfreq</code> for buttons.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    current = prefs.get("digest_frequency", "daily")
+    freq_label = prefs.get("digest_frequency", "daily")
+    days_raw = prefs.get("digest_days", "") or ""
+    extra = ""
+    if current == "custom" and days_raw:
+        from ..config import WEEKDAY_LABELS
+
+        ds = parse_digest_days(days_raw)
+        if ds:
+            extra = f" ({', '.join(WEEKDAY_LABELS[d] for d in ds)})"
+    _ = await message.reply_text(
+        f"📬 Current frequency: <b>{_escape_html(freq_label)}</b>{_escape_html(extra)}\n\n"
+        "Choose how often to receive digests:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=digest_frequency_keyboard(current),
     )
 
 
@@ -903,3 +1003,54 @@ async def clear_chat(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+
+async def export_briefing(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/export`` — generate an HTML digest of the latest briefing and send as document.
+
+    Reuses ``build_export_html`` so formatting stays consistent with
+    ``/news``.  No new DB — fetches current headlines for the user's
+    region/category, builds a self-contained ``.html`` file, and sends it
+    as a Telegram document for easy sharing / saving.
+    """
+    import io
+    from datetime import UTC, datetime
+
+    message = update.effective_message
+    chat_id = _effective_chat_id(update)
+    if not message or chat_id is None:
+        return
+
+    await increment(COMMAND_TOTAL)
+
+    prefs: Prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
+    country = prefs.get("country", DEFAULT_COUNTRY)
+    category = prefs.get("category", "general")
+    followed = await get_followed_topics(chat_id)
+
+    status_msg = await message.reply_text("📄 Generating HTML briefing...")
+
+    try:
+        data = await fetch_top_headlines(country, category)
+        html_doc = build_export_html(data, category, country, followed)
+        filename = f"newsdrop-{category}-{country}-{datetime.now(UTC).strftime('%Y-%m-%d')}.html"
+        buf = io.BytesIO(html_doc.encode("utf-8"))
+        # PTB reads .name if present for filename fallback
+        buf.name = filename  # noqa: E501
+        with contextlib.suppress(Exception):
+            await status_msg.delete()
+        _ = await message.reply_document(
+            document=buf,
+            filename=filename,
+            caption=(  # noqa: E501
+                f"📰 Your briefing — {category.capitalize()} · {country.upper()}  "
+                f"·  {len(html_doc)} bytes HTML"
+            ),
+        )
+    except APIClientError:
+        await increment(NEWS_API_ERRORS)
+        logger.exception("Failed to fetch news for /export")
+        _ = await status_msg.edit_text("🔧 Could not fetch news. Please try again later.")
+    except Exception as exc:
+        logger.exception("Unexpected error in /export: %s", exc)
+        _ = await status_msg.edit_text("🔧 An unexpected error occurred. Please try again later.")
