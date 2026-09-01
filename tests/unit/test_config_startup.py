@@ -1,4 +1,5 @@
 """Tests for side-effect-free imports and explicit startup validation."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -56,10 +57,7 @@ def test_database_import_does_not_create_db(tmp_path, monkeypatch):
     database._init_db()
     conn = sqlite3.connect(db_file)
     try:
-        tables = {
-            r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
         conn.close()
     assert "subscribers" in tables

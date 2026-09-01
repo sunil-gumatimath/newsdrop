@@ -332,9 +332,7 @@ async def test_send_breaking_news_skips_already_sent(tmp_db):
         patch("newsdrop.bot.jobs.fetch_breaking_news", new_callable=AsyncMock) as mock_fetch,
         # Atomic claim gate: claim returns False → slot already claimed /
         # cap reached → skip sending.
-        patch(
-            "newsdrop.bot.jobs.claim_breaking_alert_slot", new_callable=AsyncMock
-        ) as mock_mark,
+        patch("newsdrop.bot.jobs.claim_breaking_alert_slot", new_callable=AsyncMock) as mock_mark,
         patch("newsdrop.bot.jobs.cleanup_old_breaking_alerts", new_callable=AsyncMock),
         patch("newsdrop.bot.jobs.increment", new_callable=AsyncMock),
     ):
