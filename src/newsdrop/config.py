@@ -68,6 +68,7 @@ def validate_config() -> None:
             "Please set it in your .env file or environment."
         )
 
+
 DAILY_NEWS_TIME = os.getenv("DAILY_NEWS_TIME", "08:00")
 DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "us")
 DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
@@ -140,6 +141,16 @@ COMMON_TIMEZONES = [
 # Daily digest hour choices (local time) offered in /settime.
 DAILY_HOUR_CHOICES = [6, 7, 8, 9, 12, 18, 20, 21]
 
+# Digest frequency options for /setfreq (T2).
+DAILY_FREQUENCY_CHOICES = ["daily", "twice", "weekdays", "custom"]
+DAILY_FREQUENCY_LABELS: dict[str, str] = {
+    "daily": "Daily",
+    "twice": "Twice daily (8am & 8pm)",
+    "weekdays": "Weekdays (Mon–Fri)",
+    "custom": "Custom days",
+}
+WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
 
 def _default_daily_hour_from_time(value: str) -> int:
     try:
@@ -180,6 +191,26 @@ CATEGORIES = [
     "health",
     "science",
 ]
+
+SUPPORTED_LANGUAGES: dict[str, str] = {
+    "🇬🇧 English": "en",
+    "🇫🇷 French": "fr",
+    "🇩🇪 German": "de",
+    "🇪🇸 Spanish": "es",
+    "🇮🇹 Italian": "it",
+    "🇵🇹 Portuguese": "pt",
+    "🇷🇺 Russian": "ru",
+    "🇯🇵 Japanese": "ja",
+    "🇰🇷 Korean": "ko",
+    "🇨🇳 Chinese": "zh",
+    "🇸🇦 Arabic": "ar",
+    "🇮🇳 Hindi": "hi",
+    "🇳🇱 Dutch": "nl",
+    "🌐 All languages": "all",
+}
+
+# Valid language codes for validation (values of SUPPORTED_LANGUAGES).
+SUPPORTED_LANGUAGE_CODES = frozenset(SUPPORTED_LANGUAGES.values())
 
 # Centralized category keyword taxonomy and tokenizer regex. Moved out of
 # news_fetcher.py so all tunable taxonomy lists live in one place. These were

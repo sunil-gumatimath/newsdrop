@@ -547,16 +547,29 @@ def _api_country_param(country: str) -> str | None:
     return code
 
 
+def _api_language_param(language: str | None) -> str | None:
+    """Return NewsData language code, or None when 'all' / empty (no filter)."""
+    if language is None:
+        return "en"
+    code = str(language).strip().lower()
+    if not code or code == "all":
+        return None
+    return code
+
+
 async def fetch_top_headlines(
     country: str = "us",
     category: str = "general",
+    language: str = "en",
 ) -> NewsResponse:
     mapped_category = CATEGORY_MAP.get(category, category)
     params: Params = {
         "apikey": NEWS_API_KEY or "",
-        "language": "en",
         "size": 10,
     }
+    lang = _api_language_param(language)
+    if lang:
+        params["language"] = lang
     api_country = _api_country_param(country)
     if api_country:
         params["country"] = api_country
@@ -607,14 +620,16 @@ async def fetch_top_headlines(
     }
 
 
-async def search_news(query: str, country: str = "us") -> NewsResponse:
+async def search_news(query: str, country: str = "us", language: str = "en") -> NewsResponse:
     q = (query or "").strip()
     params: Params = {
         "apikey": NEWS_API_KEY or "",
         "q": q,
-        "language": "en",
         "size": 10,
     }
+    lang = _api_language_param(language)
+    if lang:
+        params["language"] = lang
 
     api_data: NewsResponse | None = None
     api_error: Exception | None = None
@@ -649,7 +664,9 @@ async def search_news(query: str, country: str = "us") -> NewsResponse:
     }
 
 
-async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list[Article]:
+async def fetch_breaking_news(
+    countries: list[str], keywords: list[str], language: str = "en"
+) -> list[Article]:
     """Fetch breaking news from the NewsData.io API, with RSS fallback.
 
     The budget gate protects the API. RSS feeds have zero API cost, so we
@@ -676,9 +693,11 @@ async def fetch_breaking_news(countries: list[str], keywords: list[str]) -> list
 
         params: Params = {
             "apikey": NEWS_API_KEY or "",
-            "language": "en",
             "size": 10,
         }
+        lang = _api_language_param(language)
+        if lang:
+            params["language"] = lang
         api_country = _api_country_param(country)
         if api_country:
             params["country"] = api_country
