@@ -16,10 +16,11 @@ def test_init_db_creates_schema(tmp_db):
         conn.close()
 
     expected = {
-        "subscribers",
         "user_preferences",
         "topic_follows",
         "breaking_alerts",
+        "saved_articles",
+        "article_feedback",
     }
     assert expected.issubset(table_names), f"missing tables. expected {expected}, got {table_names}"
 
@@ -91,4 +92,3 @@ async def test_default_country_honored_for_new_user(tmp_db):
 
     reread = await database.get_user_prefs(chat_id, default_country="in")
     assert reread["country"] == "in"
-    await database.remove_subscriber(chat_id)

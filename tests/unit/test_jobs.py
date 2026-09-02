@@ -49,7 +49,7 @@ async def test_send_daily_news_no_subscribers(tmp_db):
     """When no subscribers exist, the job exits early without API calls."""
     context = _make_context()
 
-    with patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load:
+    with patch("newsdrop.bot.jobs.load_all_user_ids", new_callable=AsyncMock) as mock_load:
         mock_load.return_value = set()
         await jobs.send_daily_news(context)
 
@@ -82,7 +82,7 @@ async def test_send_daily_news_groups_by_country_category(tmp_db):
     }
 
     with (
-        patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load,
+        patch("newsdrop.bot.jobs.load_all_user_ids", new_callable=AsyncMock) as mock_load,
         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
         patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]),
         patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
@@ -136,7 +136,7 @@ async def test_send_daily_news_chunks_long_digest(tmp_db):
         return {"country": "us", "category": "general"}
 
     with (
-        patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load,
+        patch("newsdrop.bot.jobs.load_all_user_ids", new_callable=AsyncMock) as mock_load,
         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
         patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]),
         patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
@@ -164,7 +164,7 @@ async def test_send_daily_news_handles_api_error(tmp_db):
         return {"country": "us", "category": "general"}
 
     with (
-        patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load,
+        patch("newsdrop.bot.jobs.load_all_user_ids", new_callable=AsyncMock) as mock_load,
         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
         patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,
         patch("newsdrop.bot.jobs.is_digest_due", return_value=True),
@@ -198,7 +198,7 @@ async def test_send_daily_news_empty_results_sends_no_articles_message(tmp_db):
         return {"country": "us", "category": "general"}
 
     with (
-        patch("newsdrop.bot.jobs.load_subscribers", new_callable=AsyncMock) as mock_load,
+        patch("newsdrop.bot.jobs.load_all_user_ids", new_callable=AsyncMock) as mock_load,
         patch("newsdrop.bot.jobs.get_user_prefs", new_callable=AsyncMock) as mock_prefs,
         patch("newsdrop.bot.jobs.get_followed_topics", new_callable=AsyncMock, return_value=[]),
         patch("newsdrop.bot.jobs.fetch_top_headlines", new_callable=AsyncMock) as mock_fetch,

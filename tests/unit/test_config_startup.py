@@ -60,7 +60,8 @@ def test_database_import_does_not_create_db(tmp_path, monkeypatch):
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
         conn.close()
-    assert "subscribers" in tables
+    assert "user_preferences" in tables
+    assert "subscribers" not in tables
 
 
 async def test_row_to_prefs_null_country_uses_default_country(tmp_db):

@@ -1,4 +1,4 @@
-"""Additional unit tests for database.py: alerts, health, prefs, subscribers, topics."""
+"""Additional unit tests for database.py: alerts, health, prefs, topics."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ async def test_cleanup_old_breaking_alerts_returns_count(tmp_db):
 
 
 async def test_check_db_health_counts_rows(tmp_db):
-    await database.add_subscriber(1)
+    await database.set_user_prefs(1, country="us", default_country="us")
     await database.add_followed_topic(1, "AI")
     await database.mark_breaking_alert_sent(1, "k1")
 
@@ -121,22 +121,18 @@ async def test_check_db_health_reports_unhealthy_on_error(monkeypatch):
     assert result["status"] in {"healthy", "unhealthy"}
 
 
-# ── subscribers ─────────────────────────────────────────────────────────
+# ── users (solo mode) ─────────────────────────────────────────────────────────
 
 
 async def test_subscriber_lifecycle(tmp_db):
-    assert await database.is_subscriber(100) is False
-    added = await database.add_subscriber(100)
-    assert added is True
-    assert await database.is_subscriber(100) is True
-    # Re-adding is idempotent.
-    assert await database.add_subscriber(100) is False
-    subs = await database.load_subscribers()
-    assert subs == {100}
-    removed = await database.remove_subscriber(100)
-    assert removed is True
-    assert await database.remove_subscriber(100) is False
-    assert await database.is_subscriber(100) is False
+    # Solo mode: users are tracked via user_preferences, not subscribers
+    prefs = await database.get_user_prefs(100, default_country="us")
+    assert prefs["country"] == "us"
+    await database.set_user_prefs(100, country="in", default_country="us")
+    reread = await database.get_user_prefs(100, default_country="us")
+    assert reread["country"] == "in"
+    ids = await database.load_all_user_ids()
+    assert 100 in ids
 
 
 # ── preferences ─────────────────────────────────────────────────────────

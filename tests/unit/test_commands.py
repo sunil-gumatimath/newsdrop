@@ -293,31 +293,7 @@ def test_unfollow_not_following(tmp_db):
     assert "not following" in text.lower()
 
 
-# ── /subscribe / /unsubscribe ────────────────────────────────────────────
-
-
-def test_subscribe_and_unsubscribe(tmp_db):
-    update, message, context = _make_update()
-
-    # Subscribe
-    asyncio.run(commands.subscribe(update, context))
-    sub_text = message.reply_text.call_args.args[0]
-    assert "subscribed" in sub_text.lower() or "✅" in sub_text
-
-    # Subscribe again — should be idempotent
-    asyncio.run(commands.subscribe(update, context))
-    sub_text2 = message.reply_text.call_args.args[0]
-    assert "already" in sub_text2.lower()
-
-    # Unsubscribe
-    asyncio.run(commands.unsubscribe(update, context))
-    unsub_text = message.reply_text.call_args.args[0]
-    assert "unsubscribed" in unsub_text.lower()
-
-    # Unsubscribe again — should tell user they're not subscribed
-    asyncio.run(commands.unsubscribe(update, context))
-    unsub_text2 = message.reply_text.call_args.args[0]
-    assert "not subscribed" in unsub_text2.lower()
+# ── solo mode: no /subscribe — daily is automatic ──────────────────────
 
 
 # ── /prefs ───────────────────────────────────────────────────────────────
