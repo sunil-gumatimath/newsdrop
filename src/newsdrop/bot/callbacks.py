@@ -615,6 +615,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     action, value = parsed
     expected_user_id = _extract_ownership_user_id(update, action)
+    # Strip ownership suffix from value (e.g. "in:12345" → "in") for validation
+    if expected_user_id is not None and value.endswith(f":{expected_user_id}"):
+        value = value[: -len(f":{expected_user_id}")]
     if (
         expected_user_id is not None
         and query.from_user is not None
