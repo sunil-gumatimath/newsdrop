@@ -1,4 +1,4 @@
-"""SQLite-based storage for subscribers, preferences, followed topics, and alerts.
+"""SQLite-based storage for preferences, followed topics, and alerts.
 
 This module provides simple, thread-safe SQLite access for:
 - subscriber management
@@ -141,10 +141,6 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     """Create the latest schema for fresh installs."""
     conn.executescript(
         """
-        CREATE TABLE IF NOT EXISTS subscribers (
-            chat_id INTEGER PRIMARY KEY
-        );
-
         CREATE TABLE IF NOT EXISTS user_preferences (
             chat_id INTEGER PRIMARY KEY,
             country TEXT NOT NULL DEFAULT 'us',
@@ -430,76 +426,8 @@ def _normalize_alert_key(article_key: str) -> str:
 # side-effect-free so tooling and tests can load it without a database.
 
 
-# ── Subscribers ──────────────────────────────────────────────────────
+# ── User Preferences ─────────────────────────────────────────────────
 
-
-def _load_subscribers_sync() -> set[int]:
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute("SELECT chat_id FROM subscribers")
-            return {row["chat_id"] for row in cursor.fetchall()}
-        finally:
-            conn.close()
-
-
-async def load_subscribers() -> set[int]:
-    return await asyncio.to_thread(_load_subscribers_sync)
-
-
-def _add_subscriber_sync(chat_id: int) -> bool:
-    """Add a subscriber. Returns True if newly added, False if already exists."""
-    with _lock:
-        conn = _get_connection()
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)",
-                (chat_id,),
-            )
-            conn.commit()
-            return conn.total_changes > 0
-        finally:
-            conn.close()
-
-
-async def add_subscriber(chat_id: int) -> bool:
-    return await asyncio.to_thread(_add_subscriber_sync, chat_id)
-
-
-def _remove_subscriber_sync(chat_id: int) -> bool:
-    """Remove a subscriber. Returns True if removed, False if not found."""
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                "DELETE FROM subscribers WHERE chat_id = ?",
-                (chat_id,),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-        finally:
-            conn.close()
-
-
-async def remove_subscriber(chat_id: int) -> bool:
-    return await asyncio.to_thread(_remove_subscriber_sync, chat_id)
-
-
-def _is_subscriber_sync(chat_id: int) -> bool:
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                "SELECT 1 FROM subscribers WHERE chat_id = ?",
-                (chat_id,),
-            )
-            return cursor.fetchone() is not None
-        finally:
-            conn.close()
-
-
-async def is_subscriber(chat_id: int) -> bool:
-    return await asyncio.to_thread(_is_subscriber_sync, chat_id)
 
 
 # ── User Preferences ─────────────────────────────────────────────────
@@ -936,6 +864,22 @@ def _load_breaking_news_subscribers_sync() -> set[int]:
 async def load_breaking_news_subscribers() -> set[int]:
     return await asyncio.to_thread(_load_breaking_news_subscribers_sync)
 
+def _load_all_user_ids_sync() -> set[int]:
+    """Load all chat_ids that have a user_preferences row (solo-mode daily recipients)."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute("SELECT chat_id FROM user_preferences")
+            return {row["chat_id"] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+
+async def load_all_user_ids() -> set[int]:
+    return await asyncio.to_thread(_load_all_user_ids_sync)
+
+
+
 
 def _mark_breaking_alert_sent_sync(
     chat_id: int,
@@ -1229,11 +1173,11 @@ def _check_db_health_sync() -> dict[str, str]:
         try:
             conn.execute("SELECT 1").fetchone()
 
-            subscriber_row = conn.execute("SELECT COUNT(*) AS count FROM subscribers").fetchone()
+            user_row = conn.execute("SELECT COUNT(*) AS count FROM user_preferences").fetchone()
             topic_row = conn.execute("SELECT COUNT(*) AS count FROM topic_follows").fetchone()
             alert_row = conn.execute("SELECT COUNT(*) AS count FROM breaking_alerts").fetchone()
 
-            subscriber_count = int(subscriber_row["count"]) if subscriber_row else 0
+            subscriber_count = int(user_row["count"]) if user_row else 0
             topic_count = int(topic_row["count"]) if topic_row else 0
             alert_count = int(alert_row["count"]) if alert_row else 0
 
