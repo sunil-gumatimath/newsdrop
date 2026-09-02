@@ -126,6 +126,10 @@ def _clean_blurb_text(value: object) -> str:
         return ""
     if low.startswith("click here") or low.startswith("read more"):
         return ""
+    if "only available in paid plans" in low:
+        return ""
+    if "available in paid plans" in low:
+        return ""
     return text
 
 
@@ -258,11 +262,26 @@ def _format_source_line(article: Article) -> str:
     """Build a clean meta line: time · source · also covered by …"""
     _, source_escaped = _get_source_name(article)
     rel_time = _format_relative_time(str(article.get("publishedAt", "")))
+    # HN extra: show points/comments in meta, not as blurb
+    hn_meta = ""
+    if source_escaped.lower().find("hacker") != -1:
+        pts = article.get("_hn_points")
+        cms = article.get("_hn_comments") or article.get("num_comments")
+        # hn_feeds stores _hn_points, but also check points
+        if pts is None:
+            pts = article.get("points")
+        bits = []
+        if isinstance(pts, int) and pts:
+            bits.append(f"▲ {pts}")
+        if isinstance(cms, int) and cms:
+            bits.append(f"{cms} comments")
+        if bits:
+            hn_meta = " · " + " · ".join(bits)
 
     parts: list[str] = []
     if rel_time:
         parts.append(f"⏱ {rel_time}")
-    parts.append(f"📍 {source_escaped}")
+    parts.append(f"📍 {source_escaped}{hn_meta}")
 
     related = article.get("relatedSources") or []
     if isinstance(related, list) and related:

@@ -99,6 +99,7 @@ def _hn_hit_to_article(hit: dict[str, Any]) -> Article | None:
         "creator": [str(hit.get("author") or "HN")],
         "_hn_objectID": object_id,
         "_hn_points": hit.get("points"),
+        "_hn_comments": hit.get("num_comments"),
     }
 
 
