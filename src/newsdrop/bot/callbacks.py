@@ -22,6 +22,7 @@ from ..database import (
     set_breaking_news_preference,
     set_user_prefs,
 )
+from ..message_utils import send_chunked_message
 from ..metrics import COMMAND_NEWS, COMMAND_TOTAL, NEWS_API_ERRORS, increment
 from ..news_fetcher import (
     APIClientError,
@@ -222,16 +223,46 @@ async def _handle_obnews_callback(query: CallbackQuery, chat_id: int) -> None:
             return
         if result.digest is None:
             return
-        # Telegram edit_message_text max is 4096; fall back to truncated if needed.
-        text = result.digest
-        if len(text) > 4000:
-            text = text[:3990] + "…"
-        _ = await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            reply_markup=result.reply_markup,
-        )
+        # Use same chunking logic as /news to avoid cutting inside HTML tags (which
+        # caused BadRequest "can't find end tag for b" when we did naive 3990 truncation).
+        if len(result.digest) <= 4096:
+            try:
+                _ = await query.edit_message_text(
+                    result.digest,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=result.reply_markup,
+                )
+            except Exception as exc:
+                # Fallback: HTML parse error (unbalanced tag) -> retry without HTML
+                logger.warning("obnews edit with HTML failed, retrying plain: %s", exc)
+                _ = await query.edit_message_text(
+                    result.digest,
+                    disable_web_page_preview=True,
+                    reply_markup=result.reply_markup,
+                )
+        else:
+            # Too long for a single edit — delete placeholder and send chunked
+            with contextlib.suppress(Exception):
+                await query.delete_message()
+            # query.message is the original placeholder; use its chat to send chunks
+            msg = query.message
+            if msg is not None:
+                await send_chunked_message(
+                    msg,  # type: ignore[arg-type]
+                    result.digest,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                if result.reply_markup is not None:
+                    with contextlib.suppress(Exception):
+                        _ = await msg.reply_text(  # type: ignore[attr-defined]
+                            "📖 Open full articles:",
+                            reply_markup=result.reply_markup,
+                        )
+            else:
+                # Fallback if message gone: try truncated plain
+                _ = await query.edit_message_text(result.digest[:4096])
     except APIClientError:
         await increment(NEWS_API_ERRORS)
         _ = await query.edit_message_text(
