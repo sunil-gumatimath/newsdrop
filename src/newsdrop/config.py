@@ -77,6 +77,10 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "")
 # Multi-source support. Set ENABLE_RSS=0 to disable RSS augmentation.
 ENABLE_RSS = os.getenv("ENABLE_RSS", "1") not in ("0", "false", "False", "no")
 
+# Hacker News Algolia — free, no API key (https://hn.algolia.com/api)
+ENABLE_HN = os.getenv("ENABLE_HN", "1") not in ("0", "false", "False", "no")
+HN_HITS_PER_PAGE = _safe_int_env("HN_HITS_PER_PAGE", 10)
+
 # NewsData.io free tier request budget. Set to 0 to disable local request limiting.
 # Uses _safe_int_env so invalid values (e.g. "abc") fall back to 200 with a warning
 # instead of crashing import (which would break mypy/tooling).
