@@ -449,6 +449,7 @@ async def test_fetch_top_headlines_merges_sources_and_reports_them():
             news_fetcher, "_fetch_news", AsyncMock(return_value={"articles": api_articles})
         ),
         patch.object(news_fetcher, "_safe_fetch_rss", AsyncMock(return_value=rss_articles)),
+        patch.object(news_fetcher, "_safe_fetch_hn", AsyncMock(return_value=[])),
     ):
         result = await news_fetcher.fetch_top_headlines("us", "general")
 

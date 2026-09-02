@@ -22,10 +22,13 @@ import httpx
 from .config import (
     CATEGORY_KEYWORDS,
     DAILY_REQUEST_LIMIT,
+    ENABLE_HN,
     ENABLE_RSS,
     GLOBAL_COUNTRY_CODES,
+    HN_HITS_PER_PAGE,
     NEWS_API_KEY,
 )
+from .hn_feeds import fetch_hn_articles
 from .rss_feeds import (
     fetch_rss_articles,
     fetch_rss_category_articles,
@@ -421,6 +424,20 @@ async def _safe_fetch_rss(
         return []
 
 
+async def _safe_fetch_hn(
+    query: str | None = None,
+    limit: int = 10,
+    category: str = "general",
+) -> list[Article]:
+    if not ENABLE_HN:
+        return []
+    try:
+        return await fetch_hn_articles(limit=limit, query=query, category=category)
+    except Exception as exc:
+        logger.warning("HN fetch failed (query=%r cat=%s): %s", query, category, exc)
+        return []
+
+
 def _query_terms(query: str) -> list[str]:
     """Tokenize a search query into matchable terms."""
     raw = (query or "").strip().lower()
@@ -577,9 +594,10 @@ async def fetch_top_headlines(
     if mapped_category and mapped_category != "top":
         params["category"] = mapped_category
 
-    api_result, rss_result = await asyncio.gather(
+    api_result, rss_result, hn_result = await asyncio.gather(
         _fetch_news(params),
         _safe_fetch_rss(country, limit=20, category=category),
+        _safe_fetch_hn(limit=HN_HITS_PER_PAGE, category=category),
         return_exceptions=True,
     )
 
@@ -598,19 +616,27 @@ async def fetch_top_headlines(
     elif isinstance(rss_result, list):
         rss_articles = rss_result
 
+    hn_articles: list[Article] = []
+    if isinstance(hn_result, Exception):
+        logger.warning("HN fetch failed for %s: %s", country, hn_result)
+    elif isinstance(hn_result, list):
+        hn_articles = hn_result
+
     api_articles = (api_data or {}).get("articles", [])
     api_articles = api_articles if isinstance(api_articles, list) else []
 
     if not api_articles and not rss_articles and api_error is not None:
         raise api_error
 
-    merged = _merge_and_dedupe(api_articles, rss_articles, limit=10)
+    merged = _merge_and_dedupe(api_articles, rss_articles, hn_articles, limit=10)
 
     sources_used: list[str] = []
     if api_articles:
         sources_used.append("newsdata.io")
     if rss_articles:
         sources_used.append("rss")
+    if hn_articles:
+        sources_used.append("hn")
 
     return {
         "status": "ok",
@@ -643,6 +669,9 @@ async def search_news(query: str, country: str = "us", language: str = "en") -> 
     # RSS: pull a wider pool, then strict whole-word filter (fixes "AI" → airport).
     rss_articles = await _safe_fetch_rss(country, limit=50, category="general")
     rss_articles = _filter_by_query(rss_articles, q)
+    # HN: free parallel search for tech queries
+    hn_articles = await _safe_fetch_hn(query=q, limit=10, category="general")
+    hn_articles = _filter_by_query(hn_articles, q) if q else hn_articles
 
     api_articles = (api_data or {}).get("articles", [])
     api_articles = api_articles if isinstance(api_articles, list) else []
@@ -653,7 +682,7 @@ async def search_news(query: str, country: str = "us", language: str = "en") -> 
         raise api_error
 
     # Prefer API hits (already query-targeted), then RSS; re-score by relevance.
-    merged = _merge_and_dedupe(api_articles, rss_articles, limit=20)
+    merged = _merge_and_dedupe(api_articles, rss_articles, hn_articles, limit=20)
     merged = _filter_by_query(merged, q)[:10]
 
     return {
