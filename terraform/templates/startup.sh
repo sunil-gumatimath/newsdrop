@@ -8,7 +8,20 @@ echo "=== newsdrop Setup Startup Script Started ==="
 
 # Update package lists and install Docker, Git, and curl
 apt-get update -y
-apt-get install -y curl git docker.io docker-compose-plugin
+apt-get install -y curl git docker.io
+# Install Docker Compose v2 plugin from official Docker repo (not in Debian repo)
+if ! docker compose version >/dev/null 2>&1; then
+  echo "Installing docker-compose-plugin from Docker repo..."
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+  apt-get update -y
+  apt-get install -y docker-compose-plugin || {
+    echo "Docker repo install failed, trying apt docker-compose fallback..."
+    apt-get install -y docker-compose
+  }
+fi
 
 # Enable and start Docker service
 systemctl enable docker
