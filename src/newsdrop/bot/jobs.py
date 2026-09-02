@@ -26,8 +26,8 @@ from ..database import (
     count_breaking_alerts_today,
     get_followed_topics,
     get_user_prefs,
+    load_all_user_ids,
     load_breaking_news_subscribers,
-    load_subscribers,
     parse_breaking_keywords,
 )
 from ..message_utils import chunk_message
@@ -430,21 +430,21 @@ async def _send_combo(
 
 async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send digests to subscribers whose local preferred hour is now."""
-    subscribers = await load_subscribers()
-    if not subscribers:
-        logger.info("No subscribers to send daily news to.")
+    user_ids = await load_all_user_ids()
+    if not user_ids:
+        logger.info("No users to send daily news to.")
         return
 
     due: list[int] = []
-    for chat_id in subscribers:
+    for chat_id in user_ids:
         prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
         if is_digest_due(prefs):
             due.append(chat_id)
 
     if not due:
         logger.info(
-            "No subscribers due for daily news this hour (checked %s).",
-            len(subscribers),
+            "No users due for daily news this hour (checked %s).",
+            len(user_ids),
         )
         return
 
@@ -459,7 +459,7 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
         grouped.setdefault((country, category), []).append(chat_id)
 
     logger.info(
-        "Grouped %s subscribers into %s unique (country, category) combos.",
+        "Grouped %s users into %s unique (country, category) combos.",
         len(due),
         len(grouped),
     )

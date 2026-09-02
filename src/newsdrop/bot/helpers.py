@@ -539,7 +539,7 @@ def category_keyboard(onboarding: bool = False, user_id: int | None = None) -> I
 def onboarding_finish_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Subscribe to daily news", callback_data="obsub:1")],
+            [InlineKeyboardButton("✅ Done — daily digest enabled", callback_data="obsub:1")],
             [
                 InlineKeyboardButton("📰 Get news now", callback_data="obnews:1"),
                 InlineKeyboardButton("Skip", callback_data="obsub:0"),

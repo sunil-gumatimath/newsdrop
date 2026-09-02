@@ -15,11 +15,9 @@ from ..config import (
 )
 from ..database import (
     add_followed_topic,
-    add_subscriber,
     clear_followed_topics,
     get_followed_topics,
     get_user_prefs,
-    is_subscriber,
     remove_followed_topic,
     set_breaking_news_preference,
     set_user_prefs,
@@ -125,8 +123,6 @@ async def _handle_obcategory_callback(query: CallbackQuery, chat_id: int, value:
 
 async def _handle_obsub_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
     if value == "1":
-        if not await is_subscriber(chat_id):
-            await add_subscriber(chat_id)
         prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
         hour = prefs.get("daily_hour", str(DEFAULT_DAILY_HOUR))
         tz = prefs.get("timezone", DEFAULT_TIMEZONE)

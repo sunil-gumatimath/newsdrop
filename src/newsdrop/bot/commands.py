@@ -18,15 +18,12 @@ from ..config import (
 )
 from ..database import (
     add_followed_topic,
-    add_subscriber,
     check_db_health,
     get_breaking_news_preference,
     get_followed_topics,
     get_user_prefs,
-    is_subscriber,
     parse_breaking_keywords,
     remove_followed_topic,
-    remove_subscriber,
     serialize_breaking_keywords,
     set_user_prefs,
 )
@@ -37,11 +34,9 @@ from ..metrics import (
     COMMAND_HEALTH,
     COMMAND_NEWS,
     COMMAND_SEARCH,
-    COMMAND_SUBSCRIBE,
     COMMAND_TOTAL,
     COMMAND_TRENDING,
     COMMAND_UNFOLLOW,
-    COMMAND_UNSUBSCRIBE,
     NEWS_API_ERRORS,
     all_metrics,
     increment,
@@ -96,7 +91,7 @@ async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         "Welcome to <b>newsdrop</b> 📰\n\n"
         "Personalized headlines in Telegram — multi-source, ranked, short blurbs.\n\n"
         "<b>Step 1 of 3 — pick your region</b>\n"
-        "Then choose a category and (optionally) subscribe to a daily briefing.\n\n"
+        "Then choose a category for your daily briefing.\n\n"
         "You can also jump ahead: /news · /help"
     )
     _ = await message.reply_text(
@@ -398,50 +393,6 @@ async def set_category(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
-async def subscribe(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    chat_id = _effective_chat_id(update)
-    if not message or chat_id is None:
-        return
-
-    await increment(COMMAND_TOTAL)
-    await increment(COMMAND_SUBSCRIBE)
-
-    if await is_subscriber(chat_id):
-        _ = await message.reply_text("You are already subscribed to daily news!")
-        return
-
-    await add_subscriber(chat_id)
-    prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
-    hour = prefs.get("daily_hour", str(DEFAULT_DAILY_HOUR))
-    tz = prefs.get("timezone", DEFAULT_TIMEZONE)
-    _ = await message.reply_text(
-        f"✅ Subscribed! You'll receive daily news around "
-        f"<b>{_escape_html(hour)}:00</b> ({_escape_html(tz)}) "
-        f"for {_escape_html(prefs['category'])} · "
-        f"{_escape_html(prefs['country'].upper())}.\n"
-        "Use /settime and /settimezone to change delivery. /unsubscribe to stop.",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-async def unsubscribe(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    chat_id = _effective_chat_id(update)
-    if not message or chat_id is None:
-        return
-
-    await increment(COMMAND_TOTAL)
-    await increment(COMMAND_UNSUBSCRIBE)
-
-    if not await is_subscriber(chat_id):
-        _ = await message.reply_text("You are not subscribed to daily news.")
-        return
-
-    await remove_subscriber(chat_id)
-    _ = await message.reply_text("Unsubscribed. You will no longer receive daily news.")
-
-
 async def preferences(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat_id = _effective_chat_id(update)
@@ -498,7 +449,6 @@ async def help_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
         "<b>newsdrop commands</b>\n\n"
         "<b>Daily</b>\n"
         "/news — briefing now\n"
-        "/subscribe · /unsubscribe — scheduled digests\n"
         "/settime · /settimezone — delivery schedule\n"
         "/setcountry · /setcategory · /prefs\n\n"
         "<b>Discover</b>\n"
@@ -520,7 +470,7 @@ async def help_command(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         logger.exception("Failed to send /help response")
         _ = await message.reply_text(
-            "newsdrop: /news /subscribe /setcountry /setcategory "
+            "newsdrop: /news /setcountry /setcategory "
             "/settime /settimezone /search /follow /breaking "
             "/breakkeywords /quiet /prefs /clear /help"
         )
@@ -945,7 +895,7 @@ async def health(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         health_message += f"\n{db_emoji} Database: {db_health['status']}"
 
         if db_health["status"] == "healthy":
-            health_message += f"\n   Subscribers: {db_health.get('subscriber_count', '0')}"
+            health_message += f"\n   Users: {db_health.get('subscriber_count', '0')}"
             health_message += f"\n   Followed topics: {db_health.get('followed_topic_count', '0')}"
             health_message += (
                 f"\n   Breaking alerts tracked: {db_health.get('breaking_alert_count', '0')}"

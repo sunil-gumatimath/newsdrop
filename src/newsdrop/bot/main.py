@@ -41,11 +41,9 @@ from .commands import (
     set_time,
     set_timezone,
     start,
-    subscribe,
     trending,
     unfollow_all_topics,
     unfollow_topic,
-    unsubscribe,
 )
 from .health_server import set_ready, start_health_server
 from .helpers import logger
@@ -63,7 +61,6 @@ async def _setup_commands(
         BotCommand("start", "Start the bot"),
         BotCommand("news", "Get latest news briefing"),
         BotCommand("export", "Export briefing as HTML"),
-        BotCommand("subscribe", "Enable daily news delivery"),
         BotCommand("search", "Search news by topic"),
         BotCommand("follow", "Follow a topic"),
         BotCommand("setcountry", "Choose news region"),
@@ -163,8 +160,6 @@ def main() -> None:
     app.add_handler(CommandHandler("setfreq", set_freq))
     app.add_handler(CommandHandler("quiet", quiet_hours))
     app.add_handler(CommandHandler("breakkeywords", breakkeywords))
-    app.add_handler(CommandHandler("subscribe", subscribe))
-    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("prefs", preferences))
     app.add_handler(CommandHandler("breaking", breaking_toggle))
     app.add_handler(CommandHandler("trending", trending))
@@ -180,7 +175,7 @@ def main() -> None:
         logger.error("Job queue is unavailable. Install job-queue dependencies.")
         return
 
-    # Hourly tick: each subscriber is due when local hour == their preferred hour.
+    # Hourly tick: each user is due when local hour == their preferred hour.
     app.job_queue.run_repeating(
         send_daily_news,
         interval=3600,
