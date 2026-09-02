@@ -30,6 +30,8 @@ Article = dict[str, Any]
 # Higher = preferred when picking a cluster representative / ranking.
 # Matched case-insensitively as substring against source display name.
 SOURCE_TRUST: dict[str, float] = {
+    "hacker news": 0.82,
+    "hn": 0.82,
     "reuters": 1.0,
     "associated press": 1.0,
     "ap news": 1.0,
