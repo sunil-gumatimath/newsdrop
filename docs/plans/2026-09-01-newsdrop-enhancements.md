@@ -1,5 +1,10 @@
 # newsdrop enhancements — plan 2026-09-01 (skip AI)
 
+> **Status (2026-10):** T2 and T4 shipped in full. T1 (bookmarks) and T3
+> (feedback) were built only at the DB layer — that dead scaffolding has been
+> removed along with the T5/T6 `language`/`channel_id` columns. If these
+> features are ever revisited, restart from the DB schema.
+
 ## Context
 Implement all quick/medium wins except AI TL;DR. TDD, batchwise atomic commits.
 

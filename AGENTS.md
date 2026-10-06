@@ -16,24 +16,28 @@ src/newsdrop/
 │   ├── helpers.py       # Digests, search cards, breaking format, keyboards, /clear helper
 │   └── health_server.py # Lightweight HTTP health/metrics endpoint
 ├── config.py            # Env-driven configuration (countries, categories, thresholds)
-├── database.py          # SQLite: subscribers, prefs, topic follows, breaking-alert dedupe
+├── database.py          # SQLite: prefs, topic follows, breaking-alert dedupe
 ├── news_fetcher.py      # NewsData.io client + merge path (top, search, trending, breaking)
 ├── story_ranker.py      # Source trust weights, near-duplicate clustering, ranking
+├── story_utils.py       # Title similarity, URL canonicalization, dedupe helpers
 ├── rss_feeds.py         # Country + category RSS catalog, feed health cooldown
+├── hn_feeds.py          # Hacker News (Algolia) free feed for tech coverage
 ├── message_utils.py     # Telegram message chunking
 ├── metrics.py           # Named counters (daily messages, breaking alerts, errors)
+├── logging_config.py    # Text/JSON logging setup (LOG_FORMAT=json)
 └── state.py             # Pluggable cache / rate-limit / API budget (Redis or in-memory)
 
 tests/
 ├── conftest.py          # tmp_db fixture (SQLite), rate-limit isolation autouse
 ├── unit/                # Fast, fully-mocked unit tests
-└── integration/         # Tests that exercise real I/O (network, DB)
+└── integration/         # Handler tests with mocked Telegram objects
 ```
 
 ## Key Design Decisions
 
 - **Batched daily sends**: `send_daily_news` groups subscribers by `(country, category)`, fetches once per combo, then personalises the digest per user (followed topics first + why-tags). API usage scales with unique combos, not subscriber count.
-- **Multi-source merge**: `fetch_top_headlines` runs NewsData.io + RSS in parallel, then `story_ranker.rank_and_cluster` clusters near-duplicates and ranks by trust, corroboration, and freshness.
+- **Multi-source merge**: `fetch_top_headlines` runs NewsData.io + RSS + Hacker News in parallel, then `story_ranker.rank_and_cluster` clusters near-duplicates and ranks by trust, corroboration, and freshness.
+- **Solo mode**: There is no subscribers table or `/subscribe` command — every user with a preferences row is a daily recipient; scheduling comes from `/settime` + `/settimezone` (+ `/setfreq`).
 - **Category RSS**: Non-general categories use dedicated feeds (tech, business, sports, …) so RSS does not rely only on keyword filters of general headlines.
 - **Search relevance**: `_filter_by_query` uses **whole-word** matching and relevance scoring so short queries like `AI` do not match `airport` / `against`.
 - **Breaking alerts**: Compact single message with matched keyword reason, open-article button, and daily cap counter. Title hits preferred; body-only needs ≥2 keywords. Deduped via `breaking_alerts` table; pruned by `BREAKING_ALERT_RETENTION_DAYS`.

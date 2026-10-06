@@ -13,13 +13,13 @@ Comprehensive list of user-facing features and slash commands in the `newsdrop` 
 | `/unfollow <topic>` | `unfollow_topic` | Stop following one topic. |
 | `/follows` / `/topics` | `list_followed_topics` | List followed topics. |
 | `/unfollowall` | `unfollow_all_topics` | Clear all follows (inline confirmation). |
-| `/subscribe` | `subscribe` | Enable daily digests at the user’s local hour. |
-| `/unsubscribe` | `unsubscribe` | Disable daily digests. |
 | `/setcountry` | `set_country` | Region picker (World + 10 countries) via inline buttons. |
 | `/setcategory` | `set_category` | Category picker (7 options). |
 | `/settime` | `set_time` | Preferred local hour for daily digest. |
 | `/settimezone` | `set_timezone` | IANA timezone for digests and quiet hours. |
+| `/setfreq` | `set_freq` | Digest frequency: daily, twice (8am/8pm), weekdays, or custom days. |
 | `/quiet` | `quiet_hours` | Quiet hours for breaking alerts (`/quiet 22 7` or `/quiet off`). |
+| `/export` | `export_briefing` | Download the current briefing as a self-contained HTML file. |
 | `/prefs` | `preferences` | Show region, category, schedule, quiet hours, breaking settings. |
 | `/breaking` | `breaking_toggle` | Toggle alerts; option to use followed topics as keywords. |
 | `/breakkeywords` | `breakkeywords` | Add / remove / clear personal alert keywords. |
@@ -28,7 +28,10 @@ Comprehensive list of user-facing features and slash commands in the `newsdrop` 
 | `/health` | `health` | **Admin only** (`ADMIN_CHAT_IDS`). Ops diagnostics; prefer HTTP `/health` for probes. |
 | `/help` / `/commands` | `help_command` | Grouped command list (Daily / Discover / Alerts / Utilities). |
 
-Bot menu (Telegram command list) includes: start, news, subscribe, search, follow, setcountry, setcategory, settime, settimezone, breaking, prefs, clear, help.
+Bot menu (Telegram command list) includes: start, news, export, search, follow, setcountry, setcategory, setfreq, settime, settimezone, breaking, prefs, clear, help.
+
+> Note: there is no `/subscribe` — daily delivery is automatic for every user with
+> preferences (solo mode). Schedule it with `/settime` + `/settimezone`.
 
 ## Product features
 
@@ -59,7 +62,7 @@ Bot menu (Telegram command list) includes: start, news, subscribe, search, follo
 - Does **not** wipe full Telegram history or all user-typed messages in DMs
 
 ### Aggregation & ranking
-- NewsData.io + country/category RSS
+- NewsData.io + country/category RSS + Hacker News (Algolia)
 - Story clustering (near-duplicate titles/URLs)
 - Source trust weights (e.g. Reuters, AP, The Guardian)
 - Shared API client, cache, and daily request budget

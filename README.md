@@ -174,25 +174,6 @@ python -m newsdrop
 
 ---
 
-### Option 4: Hosting on Google Cloud Platform (GCP)
-
-#### Method A: Existing GCE VM with Docker
-
-```bash
-git clone https://github.com/sunil-gumatimath/newsdrop.git
-cd newsdrop
-cp .env.example .env   # fill secrets
-docker compose up -d --build
-```
-
-#### Method B: New VM with Terraform
-
-1. `cd terraform`
-2. Create `terraform.tfvars` with project variables and secrets.
-3. `terraform init` then `terraform apply`.
-
----
-
 ## Configuration Variables
 
 | Variable | Default | Description |
@@ -234,10 +215,9 @@ docker compose up -d --build
 | `/unfollow <topic>` | Unfollow one topic |
 | `/follows` / `/topics` | List followed topics |
 | `/unfollowall` | Clear all follows (confirm) |
-| `/subscribe` | Enable daily digest |
-| `/unsubscribe` | Disable daily digest |
 | `/setcountry` | Pick region (World + 10 countries) |
 | `/setcategory` | Pick category (7 topics) |
+| `/setfreq` | Digest frequency: daily / twice / weekdays / custom |
 | `/settime` | Local hour for daily digest |
 | `/settimezone` | IANA timezone |
 | `/quiet` | Quiet hours for alerts (`22 7` or `off`) |
@@ -245,6 +225,7 @@ docker compose up -d --build
 | `/breaking` | Toggle breaking alerts + follow-as-keywords option |
 | `/breakkeywords` | Manage personal alert keywords |
 | `/trending [category]` | Trending topics (+ follow/search buttons) |
+| `/export` | Download the briefing as a self-contained HTML file |
 | `/clear` | Clear recent bot-accessible messages (confirm) |
 | `/health` | Admin diagnostics (`ADMIN_CHAT_IDS`) |
 | `/help` / `/commands` | Full command list |
