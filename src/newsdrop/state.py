@@ -65,23 +65,14 @@ class StateBackend(ABC):
         """Return ``(used_today, limit)``."""
 
     @abstractmethod
-    async def is_rate_limited(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
-        """Return ``True`` if ``chat_id`` is still on cooldown in ``scope``."""
-
-    @abstractmethod
-    async def record_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> None:
-        """Mark ``chat_id`` as rate-limited in ``scope`` for ``cooldown_seconds``."""
-
-    @abstractmethod
     async def try_acquire_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
         """Atomically check AND record a rate-limit.
 
         Returns ``True`` if the caller is allowed (was not rate-limited and
         has been marked). ``False`` if the user is still on cooldown.
 
-        Combines ``is_rate_limited`` + ``record_rate_limit`` into one
-        atomic call so there is no TOCTOU race between the check and
-        the record.
+        This is the only rate-limit primitive callers should use: the check
+        and the record happen in one atomic step so there is no TOCTOU race.
         """
 
     @abstractmethod
@@ -166,44 +157,12 @@ class _MemoryBackend(StateBackend):
             self._reset_day_if_needed()
             return self._daily_count, limit
 
-    async def is_rate_limited(self, scope: str, chat_id: int, _cooldown_seconds: int) -> bool:
-        async with self._lock:
-            # Periodic cleanup of expired entries (amortized on each check).
-            # Each entry stores its expiry (monotonic) so cleanup respects
-            # per-entry TTL, not the per-call cooldown argument.
-            if len(self._rate_limits) > 5000:
-                now = asyncio.get_running_loop().time()
-                expired = [k for k, expiry in self._rate_limits.items() if now >= expiry]
-                for k in expired:
-                    del self._rate_limits[k]
-                if expired:
-                    logger.info("Rate-limit cleanup: removed %d expired entries", len(expired))
-            expiry = self._rate_limits.get(self._key(scope, str(chat_id)))
-            if expiry is None:
-                return False
-            return asyncio.get_running_loop().time() < expiry
-
-    async def record_rate_limit(
-        self,
-        scope: str,
-        chat_id: int,
-        _cooldown_seconds: int,
-    ) -> None:
-        async with self._lock:
-            # Store expiry so cleanup can use per-entry TTL without
-            # needing the original cooldown value.
-            self._rate_limits[self._key(scope, str(chat_id))] = (
-                asyncio.get_running_loop().time() + _cooldown_seconds
-            )
-
     async def try_acquire_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
         """Atomically check + record under the same lock — no TOCTOU race.
 
         The check and the record must happen while holding ``self._lock``
-        (a non-reentrant ``asyncio.Lock``). The earlier implementation
-        re-entered ``self.is_rate_limited`` / ``self.record_rate_limit``
-        which each acquire the same lock, deadlocking the calling task.
-        We inline the logic here so the lock is acquired exactly once.
+        (a non-reentrant ``asyncio.Lock``). We inline the logic here so the
+        lock is acquired exactly once.
         """
         async with self._lock:
             # Periodic cleanup of expired entries (amortized on each call).
@@ -330,26 +289,6 @@ class _RedisBackend(StateBackend):
             logger.exception("Redis get_api_request_count error")
             count = 0
         return count, limit
-
-    async def is_rate_limited(self, scope: str, chat_id: int, _cooldown_seconds: int) -> bool:
-        try:
-            exists = await self._redis.exists(self._key("rate_limit", scope, str(chat_id)))
-            return bool(exists)
-        except Exception:
-            logger.exception("Redis is_rate_limited error")
-            return False  # allow on error
-
-    async def record_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> None:
-        if cooldown_seconds <= 0:
-            return  # EX 0 is rejected by Redis; a 0s cooldown is a no-op anyway.
-        try:
-            await self._redis.setex(
-                self._key("rate_limit", scope, str(chat_id)),
-                cooldown_seconds,
-                "1",
-            )
-        except Exception:
-            logger.exception("Redis record_rate_limit error")
 
     async def try_acquire_rate_limit(self, scope: str, chat_id: int, cooldown_seconds: int) -> bool:
         """Atomically check + record using Redis ``setnx`` with expiry.
@@ -479,20 +418,8 @@ async def api_request_count(limit: int) -> tuple[int, int]:
     return await get_backend().get_api_request_count(limit)
 
 
-async def rate_limit_check(scope: str, chat_id: int, cooldown_seconds: int) -> bool:
-    return await get_backend().is_rate_limited(scope, chat_id, cooldown_seconds)
-
-
-async def rate_limit_record(scope: str, chat_id: int, cooldown_seconds: int) -> None:
-    await get_backend().record_rate_limit(scope, chat_id, cooldown_seconds)
-
-
 async def rate_limit_try_acquire(scope: str, chat_id: int, cooldown_seconds: int) -> bool:
-    """Atomically check and record a rate-limit.
-
-    Preferred over separate ``rate_limit_check`` + ``rate_limit_record``
-    calls to avoid TOCTOU race conditions.
-    """
+    """Atomically check and record a rate-limit (the only prod primitive)."""
     return await get_backend().try_acquire_rate_limit(scope, chat_id, cooldown_seconds)
 
 

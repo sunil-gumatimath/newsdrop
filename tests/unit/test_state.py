@@ -11,8 +11,7 @@ from newsdrop.state import (
     cache_get,
     cache_set,
     get_backend,
-    rate_limit_check,
-    rate_limit_record,
+    rate_limit_try_acquire,
     reset_backend,
 )
 
@@ -50,24 +49,24 @@ async def test_api_budget_and_consume():
 
 async def test_rate_limit_blocks_and_expires():
     chat_id = 12345
-    assert await rate_limit_check("test", chat_id, cooldown_seconds=1) is False
-    await rate_limit_record("test", chat_id, cooldown_seconds=1)
-    assert await rate_limit_check("test", chat_id, cooldown_seconds=1) is True
+    assert await rate_limit_try_acquire("test", chat_id, cooldown_seconds=1) is True
+    # Second acquire within the cooldown window is refused.
+    assert await rate_limit_try_acquire("test", chat_id, cooldown_seconds=1) is False
     await asyncio.sleep(1.1)
-    assert await rate_limit_check("test", chat_id, cooldown_seconds=1) is False
+    assert await rate_limit_try_acquire("test", chat_id, cooldown_seconds=1) is True
 
 
 async def test_backend_reset_clears_state():
     await cache_set("key", "value", ttl_seconds=300)
     await api_request_consume(limit=10)
-    await rate_limit_record("scope", 1, cooldown_seconds=300)
+    await rate_limit_try_acquire("scope", 1, cooldown_seconds=300)
 
     reset_backend()
     backend = get_backend()
     assert await backend.get_cache("key") is None
     count, _ = await api_request_count(limit=10)
     assert count == 0
-    assert await rate_limit_check("scope", 1, cooldown_seconds=300) is False
+    assert await rate_limit_try_acquire("scope", 1, cooldown_seconds=300) is True
 
 
 async def test_try_acquire_rate_limit_does_not_deadlock():

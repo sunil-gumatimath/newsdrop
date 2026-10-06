@@ -80,9 +80,10 @@ async def test_memory_rate_limit_cleanup_of_expired_entries():
     for i in range(5001):
         expiry = now - 100 if i % 2 == 0 else now + 10_000
         backend._rate_limits[f"scope:{i}"] = expiry
-    # Key for (scope="scope", chat_id=1) is "scope:1" — a live entry.
-    limited = await backend.is_rate_limited("scope", 1, 5)
-    assert limited is True
+    # Key for (scope="scope", chat_id=1) is "scope:1" — a live entry, so the
+    # atomic acquire must refuse while cleaning up expired entries.
+    acquired = await backend.try_acquire_rate_limit("scope", 1, 5)
+    assert acquired is False
     # Expired even-index entries were cleaned up during the check.
     assert len(backend._rate_limits) < 5001
 
@@ -251,16 +252,13 @@ async def test_redis_rate_limit_paths():
     fake = _FakeRedis()
     backend = _redis_backend_with(fake)
 
-    assert await backend.is_rate_limited("news", 1, 30) is False
-    await backend.record_rate_limit("news", 1, 30)
-    assert await backend.is_rate_limited("news", 1, 30) is True
-
     # try_acquire uses SET NX EX semantics.
+    assert await backend.try_acquire_rate_limit("news", 1, 30) is True
+    assert await backend.try_acquire_rate_limit("news", 1, 30) is False
     assert await backend.try_acquire_rate_limit("search", 2, 30) is True
     assert await backend.try_acquire_rate_limit("search", 2, 30) is False
 
-    # cooldown <= 0 short-circuits.
-    await backend.record_rate_limit("news", 3, 0)
+    # cooldown <= 0 short-circuits (always allowed, nothing stored).
     assert await backend.try_acquire_rate_limit("news", 4, 0) is True
 
 
@@ -268,8 +266,7 @@ async def test_redis_rate_limit_errors_fail_open():
     fake = _FakeRedis()
     fake.fail = True
     backend = _redis_backend_with(fake)
-    assert await backend.is_rate_limited("s", 1, 10) is False
-    await backend.record_rate_limit("s", 1, 10)  # must not raise
+    # On Redis errors the backend fails OPEN (allows the request).
     assert await backend.try_acquire_rate_limit("s", 1, 10) is True
 
 
