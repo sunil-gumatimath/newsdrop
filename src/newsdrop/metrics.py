@@ -15,8 +15,6 @@ COMMAND_NEWS = "command:news"
 COMMAND_SEARCH = "command:search"
 COMMAND_FOLLOW = "command:follow"
 COMMAND_UNFOLLOW = "command:unfollow"
-COMMAND_SUBSCRIBE = "command:subscribe"
-COMMAND_UNSUBSCRIBE = "command:unsubscribe"
 COMMAND_BREAKING_TOGGLE = "command:breaking_toggle"
 COMMAND_TRENDING = "command:trending"
 COMMAND_HEALTH = "command:health"
@@ -100,8 +98,6 @@ async def all_metrics() -> dict[str, int]:
         COMMAND_SEARCH,
         COMMAND_FOLLOW,
         COMMAND_UNFOLLOW,
-        COMMAND_SUBSCRIBE,
-        COMMAND_UNSUBSCRIBE,
         COMMAND_BREAKING_TOGGLE,
         COMMAND_TRENDING,
         COMMAND_HEALTH,

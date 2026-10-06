@@ -84,8 +84,6 @@ async def test_all_metrics_lists_every_known_counter():
         metrics.COMMAND_SEARCH,
         metrics.COMMAND_FOLLOW,
         metrics.COMMAND_UNFOLLOW,
-        metrics.COMMAND_SUBSCRIBE,
-        metrics.COMMAND_UNSUBSCRIBE,
         metrics.COMMAND_BREAKING_TOGGLE,
         metrics.COMMAND_TRENDING,
         metrics.COMMAND_HEALTH,
