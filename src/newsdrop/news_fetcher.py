@@ -927,14 +927,19 @@ async def _fetch_trending_for_country(
     try:
         params: Params = {
             "apikey": NEWS_API_KEY or "",
-            "country": country,
             "language": "en",
             "size": 10,
         }
+        # "world"/"global" are not valid NewsData country codes — omit the
+        # filter (global feed) instead of sending an invalid param.
+        api_country = _api_country_param(country)
+        if api_country:
+            params["country"] = api_country
 
         if mapped_category and mapped_category != "top":
             params["category"] = mapped_category
 
+        articles: list[Article] = []
         cache_key = _get_cache_key(params)
         cached = await cache_get(cache_key)
         if cached:
@@ -945,9 +950,16 @@ async def _fetch_trending_for_country(
                 data = await _fetch_news(params)
                 raw_articles = data.get("articles", [])
                 articles = raw_articles if isinstance(raw_articles, list) else []
-            except Exception:
-                return
+            except Exception as exc:
+                # An API failure must not skip the country entirely: RSS
+                # below still contributes at zero API cost.
+                logger.warning(
+                    "Trending NewsData fetch failed for %s, using RSS only: %s",
+                    country,
+                    exc,
+                )
 
+        # RSS always contributes, even when the API failed.
         rss_articles = await _safe_fetch_rss(country, limit=20, category=category)
         articles = _merge_and_dedupe(articles, rss_articles, limit=20)
 

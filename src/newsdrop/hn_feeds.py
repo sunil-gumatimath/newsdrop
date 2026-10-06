@@ -3,9 +3,9 @@
 Endpoint: https://hn.algolia.com/api/v1/search_by_date?tags=story
 Docs: https://hn.algolia.com/api
 
-Mapped to newsdrop Article shape for rank_and_cluster.
-Only fetched for tech/science categories or when query looks techy, to avoid
-diluting general briefings.  No budget gate — HN is unlimited free.
+Mapped to newsdrop Article shape for rank_and_cluster. Fetched for
+tech/science categories, general briefings (tech coverage), and any explicit
+search query.  No budget gate — HN is unlimited free.
 
 Uses the shared httpx client from news_fetcher for connection reuse.
 """
