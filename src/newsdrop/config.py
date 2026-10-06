@@ -6,13 +6,13 @@ from dotenv import load_dotenv
 
 # load_dotenv with override=True: values from `.env` take precedence over
 # any pre-existing OS environment variables. This is intentional for local
-# development where `.env` is authoritative. In production (Docker/GCE),
-# the container's environment is injected via compose/metadata and may not
+# development where `.env` is authoritative. In production (Docker),
+# the container's environment is injected via compose and may not
 # have a `.env` file; override=True means a stale `.env` on disk would
-# shadow the injected env — ensure `.env` is regenerated on deploy (see
-# terraform/templates/startup.sh) or set override=False if you want
-# OS-level env to win. Keeping override=True preserves local-dev ergonomics
-# but operators should be aware. See docker-compose.yml and docs.
+# shadow the injected env — ensure `.env` is regenerated on deploy or set
+# override=False if you want OS-level env to win. Keeping override=True
+# preserves local-dev ergonomics but operators should be aware.
+# See docker-compose.yml and docs.
 load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
@@ -195,26 +195,6 @@ CATEGORIES = [
     "health",
     "science",
 ]
-
-SUPPORTED_LANGUAGES: dict[str, str] = {
-    "🇬🇧 English": "en",
-    "🇫🇷 French": "fr",
-    "🇩🇪 German": "de",
-    "🇪🇸 Spanish": "es",
-    "🇮🇹 Italian": "it",
-    "🇵🇹 Portuguese": "pt",
-    "🇷🇺 Russian": "ru",
-    "🇯🇵 Japanese": "ja",
-    "🇰🇷 Korean": "ko",
-    "🇨🇳 Chinese": "zh",
-    "🇸🇦 Arabic": "ar",
-    "🇮🇳 Hindi": "hi",
-    "🇳🇱 Dutch": "nl",
-    "🌐 All languages": "all",
-}
-
-# Valid language codes for validation (values of SUPPORTED_LANGUAGES).
-SUPPORTED_LANGUAGE_CODES = frozenset(SUPPORTED_LANGUAGES.values())
 
 # Centralized category keyword taxonomy and tokenizer regex. Moved out of
 # news_fetcher.py so all tunable taxonomy lists live in one place. These were
