@@ -29,6 +29,7 @@ from ..database import (
     load_all_user_ids,
     load_breaking_news_subscribers,
     parse_breaking_keywords,
+    parse_digest_days,
 )
 from ..message_utils import chunk_message
 from ..metrics import (
@@ -57,24 +58,6 @@ def _safe_zoneinfo(name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-def _parse_digest_days_str(raw: str) -> list[int]:
-    seen: set[int] = set()
-    out: list[int] = []
-    for part in (raw or "").replace(";", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            n = int(part)
-        except ValueError:
-            continue
-        if 0 <= n <= 6 and n not in seen:
-            seen.add(n)
-            out.append(n)
-    out.sort()
-    return out
-
-
 def is_digest_due(prefs: dict[str, str], now: datetime | None = None) -> bool:
     """Return True if the user's local hour/day matches their digest schedule."""
     now = now or datetime.now(UTC)
@@ -100,7 +83,7 @@ def is_digest_due(prefs: dict[str, str], now: datetime | None = None) -> bool:
         return local.hour == preferred_hour
 
     if freq == "custom":
-        days = _parse_digest_days_str(prefs.get("digest_days", "") or "")
+        days = parse_digest_days(prefs.get("digest_days", "") or "")
         if not days:
             # No days configured → fall back to daily so user still gets digests.
             return local.hour == preferred_hour
@@ -193,10 +176,6 @@ def matching_alert_keywords(article: dict, keywords: list[str]) -> list[str]:
     if len(matched) >= 2:
         return matched
     return []
-
-
-def article_matches_keywords(article: dict, keywords: list[str]) -> bool:
-    return bool(matching_alert_keywords(article, keywords))
 
 
 async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:

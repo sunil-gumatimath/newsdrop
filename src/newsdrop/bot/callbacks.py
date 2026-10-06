@@ -79,7 +79,7 @@ async def _handle_category_callback(query: CallbackQuery, chat_id: int, value: s
     await set_user_prefs(chat_id, category=value)
     _ = await query.edit_message_text(
         f"✅ Category set to <b>{_escape_html(value.capitalize())}</b>\n\n"
-        "Tap /news for a briefing, or /subscribe for daily delivery.",
+        "Tap /news for a briefing, or /help for all commands.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -139,8 +139,8 @@ async def _handle_obsub_callback(query: CallbackQuery, chat_id: int, value: str)
         return
 
     _ = await query.edit_message_text(
-        "👍 Setup complete without a daily subscription.\n\n"
-        "Use /news anytime · /subscribe later · /help for more.",
+        "👍 Setup complete.\n\n"
+        "Use /news anytime · /settime to schedule daily delivery · /help for more.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -362,10 +362,6 @@ async def _handle_freq_callback(query: CallbackQuery, chat_id: int, value: str) 
     await set_user_prefs(
         chat_id, digest_frequency=freq, digest_days="" if freq != "custom" else None
     )
-    # For backwards compat when digest_days None not passed, ensure cleared for non-custom.
-    if freq != "custom":
-        # already cleared via "" above
-        pass
     _ = await query.edit_message_text(
         f"✅ Digest frequency set to <b>{_escape_html(freq)}</b>.",
         parse_mode=ParseMode.HTML,
@@ -378,7 +374,7 @@ async def _handle_freqday_callback(query: CallbackQuery, chat_id: int, value: st
     from ..database import parse_digest_days, serialize_digest_days
     from .helpers import custom_days_keyboard
 
-    prefs = await _get_prefs(chat_id, "us")
+    prefs = await _get_prefs(chat_id, DEFAULT_COUNTRY)
     selected = parse_digest_days(prefs.get("digest_days", "") or "")
     try:
         idx = int(value.strip())
@@ -408,7 +404,7 @@ async def _handle_freqdays_done_callback(query: CallbackQuery, chat_id: int) -> 
     from ..database import get_user_prefs as _get_prefs
     from ..database import parse_digest_days
 
-    prefs = await _get_prefs(chat_id, "us")
+    prefs = await _get_prefs(chat_id, DEFAULT_COUNTRY)
     selected = parse_digest_days(prefs.get("digest_days", "") or "")
     if not selected:
         _ = await query.edit_message_text(

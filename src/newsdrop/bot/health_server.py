@@ -152,7 +152,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
     # ═══════════════════════════════════════════════════════════════════
     # Override ``BaseHTTPRequestHandler.address_string()`` to avoid
     # expensive DNS reverse-lookup that can block the health server
-    # thread for seconds (especially in Docker/GCE).
+    # thread for seconds (especially in Docker/containers).
     # ═══════════════════════════════════════════════════════════════════
     def address_string(self) -> str:
         return str(self.client_address[0])
