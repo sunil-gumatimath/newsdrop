@@ -39,37 +39,39 @@ def test_serialize_breaking_keywords_round_trip():
 # ── breaking alert dedupe / counting / cleanup ──────────────────────────
 
 
-async def test_mark_breaking_alert_sent_dedupes(tmp_db):
+async def test_claim_breaking_alert_slot_dedupes(tmp_db):
     chat_id = 77
-    first = await database.mark_breaking_alert_sent(
-        chat_id, "Story 1", article_url="https://e.com/1", article_title="Title"
+    first = await database.claim_breaking_alert_slot(
+        chat_id, "Story 1", article_url="https://e.com/1", article_title="Title", max_per_day=5
     )
     assert first is True
     # Same key (normalized: case + whitespace) is a duplicate.
-    dup = await database.mark_breaking_alert_sent(chat_id, "  story   1 ")
+    dup = await database.claim_breaking_alert_slot(chat_id, "  story   1 ", max_per_day=5)
     assert dup is False
     # Only one row recorded for this user.
     assert await database.count_breaking_alerts_today(chat_id) == 1
 
 
 async def test_breaking_alert_empty_key_is_noop(tmp_db):
-    assert await database.mark_breaking_alert_sent(5, "   ") is False
+    assert await database.claim_breaking_alert_slot(5, "   ") is False
     assert await database.count_breaking_alerts_today(5) == 0
 
 
-async def test_count_breaking_alerts_today(tmp_db):
+async def test_claim_breaking_alert_slot_daily_cap(tmp_db):
     chat_id = 88
-    assert await database.count_breaking_alerts_today(chat_id) == 0
     for i in range(3):
-        await database.mark_breaking_alert_sent(chat_id, f"key-{i}")
+        claimed = await database.claim_breaking_alert_slot(chat_id, f"key-{i}", max_per_day=3)
+        assert claimed is True
     assert await database.count_breaking_alerts_today(chat_id) == 3
+    # Cap reached: a different article must not claim a slot.
+    assert await database.claim_breaking_alert_slot(chat_id, "key-3", max_per_day=3) is False
     # Other users unaffected.
     assert await database.count_breaking_alerts_today(999) == 0
 
 
 async def test_cleanup_old_breaking_alerts_returns_count(tmp_db):
     chat_id = 12
-    await database.mark_breaking_alert_sent(chat_id, "recent")
+    await database.claim_breaking_alert_slot(chat_id, "recent")
     removed = await database.cleanup_old_breaking_alerts(days=14)
     assert removed == 0  # fresh rows are retained
 
@@ -87,7 +89,7 @@ async def test_cleanup_old_breaking_alerts_returns_count(tmp_db):
     removed = await database.cleanup_old_breaking_alerts(days=14)
     assert removed == 1
     # The dedupe row is gone, so the same key can be delivered again.
-    assert await database.mark_breaking_alert_sent(chat_id, "recent") is True
+    assert await database.claim_breaking_alert_slot(chat_id, "recent") is True
 
 
 # ── db health ───────────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ async def test_cleanup_old_breaking_alerts_returns_count(tmp_db):
 async def test_check_db_health_counts_rows(tmp_db):
     await database.set_user_prefs(1, country="us", default_country="us")
     await database.add_followed_topic(1, "AI")
-    await database.mark_breaking_alert_sent(1, "k1")
+    await database.claim_breaking_alert_slot(1, "k1")
 
     health = await database.check_db_health()
     assert health["status"] == "healthy"
@@ -185,12 +187,15 @@ async def test_row_to_prefs_coerces_bad_values(tmp_db):
             quiet_start_hour TEXT,
             quiet_end_hour TEXT,
             breaking_keywords TEXT,
-            breaking_use_follows TEXT
+            breaking_use_follows TEXT,
+            digest_frequency TEXT,
+            digest_days TEXT
         )
         """
     )
     conn.execute(
-        "INSERT INTO user_preferences VALUES (?, NULL, NULL, '', 'x', 'y', 'z', NULL, 'weird')",
+        "INSERT INTO user_preferences VALUES"
+        " (?, NULL, NULL, '', 'x', 'y', 'z', NULL, 'weird', NULL, NULL)",
         (1,),
     )
     db_row = conn.execute("SELECT * FROM user_preferences WHERE chat_id = 1").fetchone()
@@ -208,6 +213,9 @@ async def test_row_to_prefs_coerces_bad_values(tmp_db):
     assert prefs["quiet_end_hour"] == "0"
     assert prefs["breaking_keywords"] == ""
     assert prefs["breaking_use_follows"] == "1"
+    # NULL digest columns sanitize to defaults.
+    assert prefs["digest_frequency"] == "daily"
+    assert prefs["digest_days"] == ""
 
 
 # ── topic follows ───────────────────────────────────────────────────────

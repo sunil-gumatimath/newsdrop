@@ -77,7 +77,8 @@ async def test_row_to_prefs_null_country_uses_default_country(tmp_db):
             row = conn.execute(
                 "SELECT NULL AS country, 'general' AS category, 'UTC' AS timezone,"
                 " 8 AS daily_hour, NULL AS quiet_start_hour, NULL AS quiet_end_hour,"
-                " '' AS breaking_keywords, 1 AS breaking_use_follows"
+                " '' AS breaking_keywords, 1 AS breaking_use_follows,"
+                " 'daily' AS digest_frequency, '' AS digest_days"
             ).fetchone()
             prefs = database._row_to_prefs(row, "in")
         finally:

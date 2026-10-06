@@ -19,10 +19,11 @@ def test_init_db_creates_schema(tmp_db):
         "user_preferences",
         "topic_follows",
         "breaking_alerts",
-        "saved_articles",
-        "article_feedback",
     }
     assert expected.issubset(table_names), f"missing tables. expected {expected}, got {table_names}"
+    # Removed feature scaffolding must not reappear.
+    assert "saved_articles" not in table_names
+    assert "article_feedback" not in table_names
 
 
 async def test_followed_topics_unique_per_user(tmp_db):

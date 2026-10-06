@@ -153,9 +153,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             breaking_keywords TEXT NOT NULL DEFAULT '',
             breaking_use_follows INTEGER NOT NULL DEFAULT 1,
             digest_frequency TEXT NOT NULL DEFAULT 'daily',
-            digest_days TEXT NOT NULL DEFAULT '',
-            language TEXT NOT NULL DEFAULT 'en',
-            channel_id TEXT NOT NULL DEFAULT ''
+            digest_days TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS topic_follows (
@@ -177,31 +175,6 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_breaking_alerts_sent_at
         ON breaking_alerts (sent_at);
-
-        CREATE TABLE IF NOT EXISTS article_feedback (
-            chat_id INTEGER NOT NULL,
-            article_url TEXT NOT NULL,
-            vote INTEGER NOT NULL CHECK (vote IN (1, -1)),
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (chat_id, article_url)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_article_feedback_url
-        ON article_feedback (article_url);
-
-        CREATE INDEX IF NOT EXISTS idx_article_feedback_created_at
-        ON article_feedback (created_at);
-
-        CREATE TABLE IF NOT EXISTS saved_articles (
-            chat_id INTEGER NOT NULL,
-            url TEXT NOT NULL,
-            title TEXT NOT NULL DEFAULT '',
-            saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (chat_id, url)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_saved_articles_saved_at
-        ON saved_articles (saved_at);
         """
     )
 
@@ -211,25 +184,23 @@ def _migrate_user_preferences(conn: sqlite3.Connection) -> None:
     if not _table_exists(conn, "user_preferences"):
         conn.execute(
             """
-            CREATE TABLE user_preferences (
-                chat_id INTEGER PRIMARY KEY,
-                country TEXT NOT NULL DEFAULT 'us',
-                category TEXT NOT NULL DEFAULT 'general',
-                breaking_news_enabled INTEGER NOT NULL DEFAULT 0,
-                timezone TEXT NOT NULL DEFAULT 'UTC',
-                daily_hour INTEGER NOT NULL DEFAULT 8,
-                quiet_start_hour INTEGER,
-                quiet_end_hour INTEGER,
-                breaking_keywords TEXT NOT NULL DEFAULT '',
-                breaking_use_follows INTEGER NOT NULL DEFAULT 1,
-                digest_frequency TEXT NOT NULL DEFAULT 'daily',
-                digest_days TEXT NOT NULL DEFAULT '',
-                language TEXT NOT NULL DEFAULT 'en',
-                channel_id TEXT NOT NULL DEFAULT ''
-            )
-            """
+        CREATE TABLE user_preferences (
+            chat_id INTEGER PRIMARY KEY,
+            country TEXT NOT NULL DEFAULT 'us',
+            category TEXT NOT NULL DEFAULT 'general',
+            breaking_news_enabled INTEGER NOT NULL DEFAULT 0,
+            timezone TEXT NOT NULL DEFAULT 'UTC',
+            daily_hour INTEGER NOT NULL DEFAULT 8,
+            quiet_start_hour INTEGER,
+            quiet_end_hour INTEGER,
+            breaking_keywords TEXT NOT NULL DEFAULT '',
+            breaking_use_follows INTEGER NOT NULL DEFAULT 1,
+            digest_frequency TEXT NOT NULL DEFAULT 'daily',
+            digest_days TEXT NOT NULL DEFAULT ''
         )
-        return
+        """
+        )
+    return
 
     columns = _get_columns(conn, "user_preferences")
 
@@ -287,12 +258,6 @@ def _migrate_user_preferences(conn: sqlite3.Connection) -> None:
     if "digest_days" not in columns:
         conn.execute("ALTER TABLE user_preferences ADD COLUMN digest_days TEXT NOT NULL DEFAULT ''")
 
-    if "language" not in columns:
-        conn.execute("ALTER TABLE user_preferences ADD COLUMN language TEXT NOT NULL DEFAULT 'en'")
-
-    if "channel_id" not in columns:
-        conn.execute("ALTER TABLE user_preferences ADD COLUMN channel_id TEXT NOT NULL DEFAULT ''")
-
 
 def _migrate_topic_follows(conn: sqlite3.Connection) -> None:
     """Bring the topic_follows table up to the current schema."""
@@ -336,48 +301,6 @@ def _migrate_topic_follows(conn: sqlite3.Connection) -> None:
         )
 
 
-def _migrate_article_feedback(conn: sqlite3.Connection) -> None:
-    """Create article_feedback table for existing databases."""
-    if not _table_exists(conn, "article_feedback"):
-        conn.execute(
-            """
-            CREATE TABLE article_feedback (
-                chat_id INTEGER NOT NULL,
-                article_url TEXT NOT NULL,
-                vote INTEGER NOT NULL CHECK (vote IN (1, -1)),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (chat_id, article_url)
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_article_feedback_url ON article_feedback (article_url)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_article_feedback_created_at "  # noqa: E501
-            "ON article_feedback (created_at)"  # noqa: E501
-        )
-
-
-def _migrate_saved_articles(conn: sqlite3.Connection) -> None:
-    """Create saved_articles table for existing databases."""
-    if not _table_exists(conn, "saved_articles"):
-        conn.execute(
-            """
-            CREATE TABLE saved_articles (
-                chat_id INTEGER NOT NULL,
-                url TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT '',
-                saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (chat_id, url)
-            )
-            """
-        )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_saved_articles_saved_at ON saved_articles (saved_at)"
-    )
-
-
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Apply lightweight schema migrations.
 
@@ -388,8 +311,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     """
     _migrate_user_preferences(conn)
     _migrate_topic_follows(conn)
-    _migrate_article_feedback(conn)
-    _migrate_saved_articles(conn)
 
 
 def _init_db() -> None:
@@ -429,10 +350,6 @@ def _normalize_alert_key(article_key: str) -> str:
 # ── User Preferences ─────────────────────────────────────────────────
 
 
-
-# ── User Preferences ─────────────────────────────────────────────────
-
-
 def _safe_str_to_int(value: object, default: int = 0) -> int:
     """Convert a DB value to int, returning ``default`` on failure."""
     if value is None:
@@ -455,8 +372,6 @@ def _default_prefs(default_country: str = "us") -> dict[str, str]:
         "breaking_use_follows": "1",
         "digest_frequency": "daily",
         "digest_days": "",
-        "language": "en",
-        "channel_id": "",
     }
 
 
@@ -495,23 +410,6 @@ def serialize_digest_days(days: list[int]) -> str:
 def _row_to_prefs(row: sqlite3.Row, default_country: str = "us") -> dict[str, str]:
     quiet_start = row["quiet_start_hour"]
     quiet_end = row["quiet_end_hour"]
-    # Support older DBs where digest columns may not exist (pre-migration).
-    try:
-        df_raw = row["digest_frequency"]
-    except (IndexError, KeyError):
-        df_raw = "daily"
-    try:
-        dd_raw = row["digest_days"]
-    except (IndexError, KeyError):
-        dd_raw = ""
-    try:
-        lang_raw = row["language"]
-    except (IndexError, KeyError):
-        lang_raw = "en"
-    try:
-        ch_raw = row["channel_id"]
-    except (IndexError, KeyError):
-        ch_raw = ""
     return {
         "country": str(row["country"] if row["country"] is not None else default_country),
         "category": str(row["category"] if row["category"] is not None else "general"),
@@ -523,10 +421,8 @@ def _row_to_prefs(row: sqlite3.Row, default_country: str = "us") -> dict[str, st
         "breaking_use_follows": "1"
         if _safe_str_to_int(row["breaking_use_follows"], 1) != 0
         else "0",
-        "digest_frequency": _sanitize_digest_frequency(df_raw or "daily"),
-        "digest_days": str(dd_raw or ""),
-        "language": str(lang_raw or "en").strip().lower() or "en",
-        "channel_id": str(ch_raw or "").strip(),
+        "digest_frequency": _sanitize_digest_frequency(row["digest_frequency"] or "daily"),
+        "digest_days": str(row["digest_days"] or ""),
     }
 
 
@@ -534,60 +430,18 @@ def _get_user_prefs_sync(chat_id: int, default_country: str = "us") -> dict[str,
     with _lock:
         conn = _get_connection()
         try:
-            # Prefer new schema; fall back for unmigrated DBs without new columns.
-            try:
-                cursor = conn.execute(
-                    """
-                    SELECT country, category, timezone, daily_hour,
-                           quiet_start_hour, quiet_end_hour,
-                           breaking_keywords, breaking_use_follows,
-                           digest_frequency, digest_days, language, channel_id
-                    FROM user_preferences
-                    WHERE chat_id = ?
-                    """,
-                    (chat_id,),
-                )
-                row = cursor.fetchone()
-            except sqlite3.OperationalError:
-                try:
-                    cursor = conn.execute(
-                        """
-                        SELECT country, category, timezone, daily_hour,
-                               quiet_start_hour, quiet_end_hour,
-                               breaking_keywords, breaking_use_follows,
-                               digest_frequency, digest_days, language
-                        FROM user_preferences
-                        WHERE chat_id = ?
-                        """,
-                        (chat_id,),
-                    )
-                    row = cursor.fetchone()
-                except sqlite3.OperationalError:
-                    try:
-                        cursor = conn.execute(
-                            """
-                            SELECT country, category, timezone, daily_hour,
-                                   quiet_start_hour, quiet_end_hour,
-                                   breaking_keywords, breaking_use_follows,
-                                   digest_frequency, digest_days
-                            FROM user_preferences
-                            WHERE chat_id = ?
-                            """,
-                            (chat_id,),
-                        )
-                        row = cursor.fetchone()
-                    except sqlite3.OperationalError:
-                        cursor = conn.execute(
-                            """
-                            SELECT country, category, timezone, daily_hour,
-                                   quiet_start_hour, quiet_end_hour,
-                                   breaking_keywords, breaking_use_follows
-                            FROM user_preferences
-                            WHERE chat_id = ?
-                            """,
-                            (chat_id,),
-                        )
-                        row = cursor.fetchone()
+            cursor = conn.execute(
+                """
+                SELECT country, category, timezone, daily_hour,
+                       quiet_start_hour, quiet_end_hour,
+                       breaking_keywords, breaking_use_follows,
+                       digest_frequency, digest_days
+                FROM user_preferences
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            )
+            row = cursor.fetchone()
             if row:
                 return _row_to_prefs(row, default_country)
             return _default_prefs(default_country)
@@ -612,8 +466,6 @@ def _set_user_prefs_sync(
     breaking_use_follows: bool | None = None,
     digest_frequency: str | None = None,
     digest_days: str | None = None,
-    language: str | None = None,
-    channel_id: str | None = None,
     default_country: str = DEFAULT_COUNTRY,
 ) -> dict[str, str]:
     """Upsert user preferences. Only provided fields are updated."""
@@ -623,45 +475,18 @@ def _set_user_prefs_sync(
             # BEGIN IMMEDIATE prevents lost-update race: SELECT + INSERT
             # is atomic w.r.t. other writers (WAL + busy_timeout handles contention).
             conn.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = conn.execute(
-                    """
-                    SELECT country, category, timezone, daily_hour,
-                           quiet_start_hour, quiet_end_hour,
-                           breaking_keywords, breaking_use_follows,
-                           digest_frequency, digest_days, language
-                    FROM user_preferences
-                    WHERE chat_id = ?
-                    """,
-                    (chat_id,),
-                )
-                row = cursor.fetchone()
-            except sqlite3.OperationalError:
-                try:
-                    cursor = conn.execute(
-                        """
-                        SELECT country, category, timezone, daily_hour,
-                               quiet_start_hour, quiet_end_hour,
-                               breaking_keywords, breaking_use_follows,
-                               digest_frequency, digest_days
-                        FROM user_preferences
-                        WHERE chat_id = ?
-                        """,
-                        (chat_id,),
-                    )
-                    row = cursor.fetchone()
-                except sqlite3.OperationalError:
-                    cursor = conn.execute(
-                        """
-                        SELECT country, category, timezone, daily_hour,
-                               quiet_start_hour, quiet_end_hour,
-                               breaking_keywords, breaking_use_follows
-                        FROM user_preferences
-                        WHERE chat_id = ?
-                        """,
-                        (chat_id,),
-                    )
-                    row = cursor.fetchone()
+            cursor = conn.execute(
+                """
+                SELECT country, category, timezone, daily_hour,
+                       quiet_start_hour, quiet_end_hour,
+                       breaking_keywords, breaking_use_follows,
+                       digest_frequency, digest_days
+                FROM user_preferences
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            )
+            row = cursor.fetchone()
 
             current = (
                 _row_to_prefs(row, default_country) if row else _default_prefs(default_country)
@@ -692,13 +517,6 @@ def _set_user_prefs_sync(
             if digest_days is not None:
                 # Store sanitized CSV (empty string for none).
                 current["digest_days"] = serialize_digest_days(parse_digest_days(digest_days))
-            if language is not None:
-                # Normalize: lowercase, allow 'all', fallback to 'en' on empty.
-                lang = str(language).strip().lower() or "en"
-                current["language"] = lang
-            if channel_id is not None:
-                # Normalize: strip @ prefix from @channelname inputs.
-                current["channel_id"] = str(channel_id).strip()
 
             quiet_start_db: int | None = (
                 int(current["quiet_start_hour"]) if current["quiet_start_hour"] != "" else None
@@ -720,11 +538,9 @@ def _set_user_prefs_sync(
                     breaking_keywords,
                     breaking_use_follows,
                     digest_frequency,
-                    digest_days,
-                    language,
-                    channel_id
+                    digest_days
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     country = excluded.country,
                     category = excluded.category,
@@ -735,9 +551,7 @@ def _set_user_prefs_sync(
                     breaking_keywords = excluded.breaking_keywords,
                     breaking_use_follows = excluded.breaking_use_follows,
                     digest_frequency = excluded.digest_frequency,
-                    digest_days = excluded.digest_days,
-                    language = excluded.language,
-                    channel_id = excluded.channel_id
+                    digest_days = excluded.digest_days
                 """,
                 (
                     chat_id,
@@ -751,8 +565,6 @@ def _set_user_prefs_sync(
                     1 if current["breaking_use_follows"] == "1" else 0,
                     current["digest_frequency"],
                     current["digest_days"],
-                    current["language"],
-                    current["channel_id"],
                 ),
             )
             conn.commit()
@@ -774,7 +586,6 @@ async def set_user_prefs(
     breaking_use_follows: bool | None = None,
     digest_frequency: str | None = None,
     digest_days: str | None = None,
-    language: str | None = None,
     default_country: str = DEFAULT_COUNTRY,
 ) -> dict[str, str]:
     return await asyncio.to_thread(
@@ -791,7 +602,6 @@ async def set_user_prefs(
         breaking_use_follows,
         digest_frequency,
         digest_days,
-        language,
         default_country,
     )
 
@@ -864,6 +674,7 @@ def _load_breaking_news_subscribers_sync() -> set[int]:
 async def load_breaking_news_subscribers() -> set[int]:
     return await asyncio.to_thread(_load_breaking_news_subscribers_sync)
 
+
 def _load_all_user_ids_sync() -> set[int]:
     """Load all chat_ids that have a user_preferences row (solo-mode daily recipients)."""
     with _lock:
@@ -877,63 +688,6 @@ def _load_all_user_ids_sync() -> set[int]:
 
 async def load_all_user_ids() -> set[int]:
     return await asyncio.to_thread(_load_all_user_ids_sync)
-
-
-
-
-def _mark_breaking_alert_sent_sync(
-    chat_id: int,
-    article_key: str,
-    article_url: str = "",
-    article_title: str = "",
-) -> bool:
-    """Persist that a breaking alert was sent.
-
-    Returns True when this is the first recorded delivery for the user/article.
-    """
-    normalized_key = _normalize_alert_key(article_key)
-    if not normalized_key:
-        return False
-
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO breaking_alerts (
-                    chat_id,
-                    article_key,
-                    article_url,
-                    article_title
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    chat_id,
-                    normalized_key,
-                    article_url.strip(),
-                    article_title.strip(),
-                ),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-        finally:
-            conn.close()
-
-
-async def mark_breaking_alert_sent(
-    chat_id: int,
-    article_key: str,
-    article_url: str = "",
-    article_title: str = "",
-) -> bool:
-    return await asyncio.to_thread(
-        _mark_breaking_alert_sent_sync,
-        chat_id,
-        article_key,
-        article_url,
-        article_title,
-    )
 
 
 def _cleanup_old_breaking_alerts_sync(days: int = 14) -> int:
@@ -1276,135 +1030,3 @@ async def claim_breaking_alert_slot(
         article_title,
         max_per_day,
     )
-
-
-# ── Bookmarks ────────────────────────────────────────────────────────
-
-
-def _save_article_sync(chat_id: int, url: str, title: str = "") -> bool:
-    """Save an article. Returns True if newly saved, False if already exists or invalid."""
-    url = url.strip()
-    title = (title or "").strip()
-    if not url:
-        return False
-    # Basic URL validation: must be http/https with netloc.
-    try:
-        from urllib.parse import urlparse as _urlparse
-
-        parsed = _urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return False
-    except Exception:
-        return False
-    if not title:
-        title = url
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO saved_articles (chat_id, url, title)
-                VALUES (?, ?, ?)
-                """,
-                (chat_id, url, title),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-        finally:
-            conn.close()
-
-
-async def save_article(chat_id: int, url: str, title: str = "") -> bool:
-    return await asyncio.to_thread(_save_article_sync, chat_id, url, title)
-
-
-def _unsave_article_sync(chat_id: int, url: str) -> bool:
-    """Remove a saved article. Returns True if removed."""
-    url = url.strip()
-    if not url:
-        return False
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                "DELETE FROM saved_articles WHERE chat_id = ? AND url = ?",
-                (chat_id, url),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-        finally:
-            conn.close()
-
-
-async def unsave_article(chat_id: int, url: str) -> bool:
-    return await asyncio.to_thread(_unsave_article_sync, chat_id, url)
-
-
-def _list_saved_sync(chat_id: int) -> list[dict[str, str]]:
-    """Return saved articles ordered by most recent first."""
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                """
-                SELECT url, title, saved_at
-                FROM saved_articles
-                WHERE chat_id = ?
-                ORDER BY saved_at DESC, rowid DESC
-                """,
-                (chat_id,),
-            )
-            rows = cursor.fetchall()
-            return [
-                {
-                    "url": str(r["url"]),
-                    "title": str(r["title"] or r["url"]),
-                    "saved_at": str(r["saved_at"]),
-                }
-                for r in rows
-            ]
-        finally:
-            conn.close()
-
-
-async def list_saved(chat_id: int) -> list[dict[str, str]]:
-    return await asyncio.to_thread(_list_saved_sync, chat_id)
-
-
-def _is_saved_sync(chat_id: int, url: str) -> bool:
-    url = url.strip()
-    if not url:
-        return False
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                "SELECT 1 FROM saved_articles WHERE chat_id = ? AND url = ?",
-                (chat_id, url),
-            )
-            return cursor.fetchone() is not None
-        finally:
-            conn.close()
-
-
-async def is_saved(chat_id: int, url: str) -> bool:
-    return await asyncio.to_thread(_is_saved_sync, chat_id, url)
-
-
-def _clear_saved_sync(chat_id: int) -> int:
-    """Remove all saved articles for a user. Returns number removed."""
-    with _lock:
-        conn = _get_connection()
-        try:
-            cursor = conn.execute(
-                "DELETE FROM saved_articles WHERE chat_id = ?",
-                (chat_id,),
-            )
-            conn.commit()
-            return cursor.rowcount if cursor.rowcount is not None else 0
-        finally:
-            conn.close()
-
-
-async def clear_saved(chat_id: int) -> int:
-    return await asyncio.to_thread(_clear_saved_sync, chat_id)
