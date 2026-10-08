@@ -42,6 +42,7 @@ from ..news_fetcher import (
     fetch_breaking_news,
     fetch_top_headlines,
 )
+from ..story_utils import token_pattern
 from .helpers import (
     _build_digest_payload,
     _get_article_key,
@@ -152,8 +153,12 @@ def resolve_alert_keywords(
 
 
 def _keyword_pattern(kw: str) -> re.Pattern[str]:
-    """Whole-word pattern for breaking keywords, supports multi-word phrases."""
-    return re.compile(rf"(?<![a-z0-9]){re.escape(kw.strip().lower())}(?![a-z0-9])", re.IGNORECASE)
+    """Whole-word pattern for breaking keywords, supports multi-word phrases.
+
+    Thin alias over :func:`story_utils.token_pattern` so the alert matcher and
+    the digest/search matchers can never drift apart.
+    """
+    return token_pattern(kw)
 
 
 def matching_alert_keywords(article: dict, keywords: list[str]) -> list[str]:

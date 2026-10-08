@@ -6,6 +6,7 @@ place for all merge paths.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -117,3 +118,25 @@ def source_name(article: dict[str, Any]) -> str:
     if isinstance(source_obj, dict):
         return str(source_obj.get("name", "") or "")
     return str(source_obj or "")
+
+
+def token_pattern(term: str) -> re.Pattern[str]:
+    """Whole-token matcher shared by every keyword / topic / query path.
+
+    Letters or digits on either side block a match, so a short query like
+    ``ai`` does not hit ``airport`` / ``against`` while a topic ending in a
+    non-word character (``c++``, ``.net``) still matches.
+
+    This is deliberately **not** ``\\b``: ``\\b`` on a term whose last
+    character is non-word requires a word character to follow it, so
+    ``\\bc++\\b`` can never match ``"c++ interop"`` and the term is silently
+    dropped from user-facing reasons.
+
+    Canonical implementation for ``news_fetcher._term_pattern``,
+    ``helpers._token_pattern`` and ``jobs._keyword_pattern`` — keep all three
+    delegating here rather than re-deriving the lookaround.
+    """
+    return re.compile(
+        rf"(?<![a-z0-9]){re.escape(term.strip().lower())}(?![a-z0-9])",
+        re.IGNORECASE,
+    )

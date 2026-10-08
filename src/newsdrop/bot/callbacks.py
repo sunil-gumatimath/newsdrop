@@ -50,6 +50,7 @@ from .helpers import (
     build_search_payload,
     category_keyboard,
     country_keyboard,
+    is_skippable_telegram_error,
     logger,
     onboarding_finish_keyboard,
 )
@@ -243,8 +244,13 @@ async def _handle_obnews_callback(query: CallbackQuery, chat_id: int) -> None:
                 )
         else:
             # Too long for a single edit — delete placeholder and send chunked
-            with contextlib.suppress(Exception):
+            try:
                 await query.delete_message()
+            except Exception as exc:
+                # The placeholder being gone already is expected; anything else
+                # is a real failure and must not vanish silently.
+                if not is_skippable_telegram_error(exc):
+                    logger.warning("Could not delete onboarding placeholder: %s", exc)
             # query.message is the original placeholder; use its chat to send chunks
             msg = query.message
             if msg is not None:
@@ -255,11 +261,16 @@ async def _handle_obnews_callback(query: CallbackQuery, chat_id: int) -> None:
                     disable_web_page_preview=True,
                 )
                 if result.reply_markup is not None:
-                    with contextlib.suppress(Exception):
+                    # Chunks are plain replies, so the keyboard cannot ride
+                    # along on them — send it as its own follow-up message.
+                    try:
                         _ = await msg.reply_text(  # type: ignore[attr-defined]
                             "📖 Open full articles:",
                             reply_markup=result.reply_markup,
                         )
+                    except Exception as exc:
+                        if not is_skippable_telegram_error(exc):
+                            logger.warning("Could not send onboarding action buttons: %s", exc)
             else:
                 # Fallback if message gone: try truncated plain
                 _ = await query.edit_message_text(result.digest[:4096])
@@ -483,8 +494,13 @@ async def _handle_search_callback(
                 # Never truncate raw HTML: a cut inside <b>/<a> makes Telegram
                 # reject the message with "Can't find end tag". chunk_message
                 # balances tags across chunks instead.
-                with contextlib.suppress(Exception):
+                try:
                     await status_msg.delete()
+                except Exception as exc:
+                    # The placeholder being gone already is expected; anything
+                    # else is a real failure and must not vanish silently.
+                    if not is_skippable_telegram_error(exc):
+                        logger.warning("Could not delete search placeholder: %s", exc)
                 await send_chunked_message(
                     status_msg,
                     result.digest,
@@ -492,11 +508,16 @@ async def _handle_search_callback(
                     disable_web_page_preview=True,
                 )
                 if result.reply_markup is not None:
-                    with contextlib.suppress(Exception):
+                    # The chunks are plain replies, so the keyboard cannot ride
+                    # along on them — send it as its own follow-up message.
+                    try:
                         _ = await status_msg.reply_text(
                             "📖 Open results / follow topic:",
                             reply_markup=result.reply_markup,
                         )
+                    except Exception as exc:
+                        if not is_skippable_telegram_error(exc):
+                            logger.warning("Could not send search action buttons: %s", exc)
         # rate limit was already acquired atomically at the top of this handler
     except APIClientError:
         logger.exception("Callback search failed")

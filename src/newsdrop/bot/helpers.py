@@ -37,6 +37,7 @@ from ..database import (
 from ..news_fetcher import (
     fetch_trending_topics,
 )
+from ..story_utils import token_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -191,10 +192,11 @@ def _normalize_topic(topic: str) -> str:
 def _token_pattern(term: str) -> re.Pattern[str]:
     """Whole-token pattern shared with the search / breaking-alert matchers.
 
-    Letters or digits on either side block the match, so ``ai`` does not hit
-    ``airport`` while ``c++`` still matches.
+    Thin alias over :func:`story_utils.token_pattern`: letters or digits on
+    either side block the match, so ``ai`` does not hit ``airport`` while
+    ``c++`` still matches.
     """
-    return re.compile(rf"(?<![a-z0-9]){re.escape(term.strip().lower())}(?![a-z0-9])", re.IGNORECASE)
+    return token_pattern(term)
 
 
 def _format_relative_time(iso_timestamp: str) -> str:
@@ -426,9 +428,21 @@ def _build_digest_keyboard(
 
     topic = _sanitize_follow_topic(follow_topic or "")
     if topic:
-        cb = f"follow:{_encode_callback_value(topic)}"
-        if len(cb.encode("utf-8")) <= 64:
-            rows.append([InlineKeyboardButton(f"➕ Follow #{topic}", callback_data=cb)])
+        encoded = _encode_callback_value(topic)
+        # This keyboard only ever emits "follow:", so the budget is that prefix
+        # alone. (_build_trending_topic_rows reserves "unfollow:" instead,
+        # because its label can flip to Unfollow after a truncation.)
+        prefix = "follow:"
+        prefix_bytes = len(prefix.encode("utf-8"))
+        if len(encoded.encode("utf-8")) + prefix_bytes <= CALLBACK_DATA_MAX_BYTES:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"➕ Follow #{topic}",
+                        callback_data=f"{prefix}{encoded}",
+                    )
+                ]
+            )
 
     return InlineKeyboardMarkup(rows) if rows else None
 
@@ -698,6 +712,39 @@ def _decode_callback_value(value: str) -> str:
     return unquote(value)
 
 
+# Telegram hard-caps callback_data at 64 *bytes*.
+CALLBACK_DATA_MAX_BYTES = 64
+
+# The longest prefix any current producer attaches to a topic value
+# ("search:" and "follow:" are 7 bytes, "unfollow:" is 9). Reserving the
+# longest one up front keeps the payload inside the cap whichever of
+# follow / unfollow ends up rendered.
+_MAX_CALLBACK_PREFIX_BYTES = len("unfollow:")
+
+# A '%' that is not followed by two hex digits is a truncated escape.
+_PARTIAL_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+def _truncate_encoded(encoded: str, max_bytes: int) -> str:
+    """Cut a percent-encoded callback value to *max_bytes* cleanly.
+
+    ``quote()`` expands ``:`` to ``%3A`` and non-ASCII characters to
+    ``%XX%XX``, so a blind byte slice can land inside an escape and leave a
+    trailing ``%3`` — which then decodes to a *literal* ``%3`` in the stored
+    topic. Drop any trailing partial escape so the value always round-trips
+    through :func:`_decode_callback_value` unchanged.
+
+    ``quote()`` output is pure ASCII, so dropping a partial escape can only
+    ever shorten the result — never leave it over the limit.
+    """
+    if len(encoded) <= max_bytes:
+        return encoded
+    cut = encoded.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+    # Every '%' in a complete encoded value is followed by two hex digits,
+    # so anything else here is a truncation artifact.
+    return _PARTIAL_ESCAPE_RE.sub("", cut)
+
+
 def _parse_callback_data(data: str) -> tuple[str, str] | None:
     if ":" not in data:
         return None
@@ -733,11 +780,13 @@ async def _build_trending_topic_rows(
         # Values are percent-encoded first so a colon inside a topic can never
         # be mistaken for the ``:<user_id>`` ownership segment.
         encoded = _encode_callback_value(safe_topic)
-        longest_prefix = max(len(f"search:{encoded}"), len(f"{follow_action}:{encoded}"))
-        if longest_prefix > 64:
-            # Truncate the encoded topic so ``follow:`` + value fits in 64 bytes.
-            encoded = encoded.encode("utf-8")[: 64 - len(f"{follow_action}:")].decode(
-                "utf-8", errors="ignore"
+        # Compare in *bytes*: Telegram enforces a 64-byte limit, and the limit
+        # must hold for whichever of follow/unfollow is rendered below (the
+        # label flips when ``is_following_topic`` changes its mind after a
+        # truncation, so a per-action budget would be racy).
+        if len(encoded.encode("utf-8")) + _MAX_CALLBACK_PREFIX_BYTES > CALLBACK_DATA_MAX_BYTES:
+            encoded = _truncate_encoded(
+                encoded, CALLBACK_DATA_MAX_BYTES - _MAX_CALLBACK_PREFIX_BYTES
             )
             safe_topic = _decode_callback_value(encoded)
             follow_action = (
@@ -1046,6 +1095,24 @@ _TELEGRAM_SKIP_MARKERS = (
 )
 
 
+def is_skippable_telegram_error(exc: Exception) -> bool:
+    """True when a Telegram error only means "nothing to act on here".
+
+    Lets callers swallow expected cleanup noise (a placeholder that was already
+    deleted) without also hiding real failures such as a malformed follow-up
+    message.
+
+    Shares ``_TELEGRAM_SKIP_MARKERS`` with ``_clear_chat_messages``, so the
+    boundary is the broad one that handler needs: anything containing
+    ``"not found"`` counts as "nothing to act on", including ``"chat not
+    found"``. Callers that need to tell those apart should match on the
+    exception text themselves.
+    """
+    return isinstance(exc, BadRequest) and any(
+        marker in str(exc).lower() for marker in _TELEGRAM_SKIP_MARKERS
+    )
+
+
 async def _clear_chat_messages(
     bot: Bot,
     chat_id: int,
@@ -1086,8 +1153,7 @@ async def _clear_chat_messages(
             skipped += 1
             continue
         except BadRequest as exc:
-            s = str(exc).lower()
-            if any(marker in s for marker in _TELEGRAM_SKIP_MARKERS):
+            if is_skippable_telegram_error(exc):
                 skipped += 1
                 continue
             logger.warning("clear_chat BadRequest for message %s: %s", msg_id, exc)

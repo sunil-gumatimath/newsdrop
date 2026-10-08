@@ -14,6 +14,8 @@ import html
 import logging
 import random
 import re
+import weakref
+from collections.abc import MutableMapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -43,6 +45,7 @@ from .state import (
     cache_set,
 )
 from .story_ranker import rank_and_cluster
+from .story_utils import token_pattern
 
 Article = dict[str, Any]
 NewsResponse = dict[str, Any]
@@ -83,10 +86,13 @@ _http_client: httpx.AsyncClient | None = None
 # A WeakKeyDictionary (not a plain dict) so an entry disappears when its loop is
 # garbage-collected: a plain dict keeps every loop ever started alive forever,
 # which is a slow leak in a test process that spins up hundreds of them.
-_http_client_locks: dict[Any, asyncio.Lock] = {}
+_http_client_locks: MutableMapping[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _http_client_lock() -> asyncio.Lock:
+    """Return the lock guarding ``_http_client`` for the running loop."""
     loop = asyncio.get_running_loop()
     lock = _http_client_locks.get(loop)
     if lock is None:
@@ -470,10 +476,12 @@ def _term_pattern(term: str) -> re.Pattern[str]:
 
     For 2-letter terms like ``ai``, require a real word boundary so we do
     **not** match inside ``against``, ``airport``, ``complaint``, ``said``.
+
+    Thin alias over :func:`story_utils.token_pattern` — the single shared
+    implementation is kept there so search, breaking alerts and topic
+    matching cannot drift apart.
     """
-    escaped = re.escape(term.lower())
-    # Word boundary: letters/digits on either side block the match.
-    return re.compile(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", re.IGNORECASE)
+    return token_pattern(term)
 
 
 def _keyword_pattern(kw: str) -> re.Pattern[str]:
@@ -483,7 +491,7 @@ def _keyword_pattern(kw: str) -> re.Pattern[str]:
     ``artificial intelligence`` only match as a complete phrase and do not
     trigger on substrings.
     """
-    return _term_pattern(kw.strip().lower())
+    return token_pattern(kw.strip().lower())
 
 
 def _article_text_fields(article: Article) -> tuple[str, str]:

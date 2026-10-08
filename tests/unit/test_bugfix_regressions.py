@@ -11,6 +11,8 @@ Fakes follow the MagicMock/AsyncMock style already used in tests/unit.
 from __future__ import annotations
 
 import asyncio
+import gc
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, cast
@@ -18,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram import CallbackQuery, InlineKeyboardButton, Update
+from telegram.error import BadRequest, Forbidden
 from telegram.ext import ContextTypes
 
 from newsdrop import database as db
@@ -25,6 +28,7 @@ from newsdrop import news_fetcher as nf
 from newsdrop.bot import commands, helpers, jobs
 from newsdrop.bot.callbacks import _extract_ownership_user_id, _handle_search_callback
 from newsdrop.message_utils import chunk_message
+from newsdrop.story_utils import token_pattern
 
 # ── 1. Schema migration must actually add missing columns ──────────────
 
@@ -379,3 +383,172 @@ async def test_send_daily_news_groups_in_one_pass(
 
     assert sorted(calls) == [1, 2, 3], "prefs must be read exactly once per user"
     assert grouped == {("us", "general"): [1, 2, 3]}
+
+
+# ── 6. One shared whole-token matcher ───────────────────────────────────
+
+
+def test_token_pattern_is_shared_by_every_matcher() -> None:
+    """The four matchers must be the same regex, not four near-copies."""
+    from newsdrop.bot.jobs import _keyword_pattern as jobs_pattern
+    from newsdrop.news_fetcher import _keyword_pattern as fetcher_pattern
+    from newsdrop.news_fetcher import _term_pattern
+
+    for term in ["ai", "C++", ".net", "  earthquake  ", "Artificial Intelligence"]:
+        expected = token_pattern(term).pattern
+        assert helpers._token_pattern(term).pattern == expected
+        assert jobs_pattern(term).pattern == expected
+        assert fetcher_pattern(term).pattern == expected
+        assert _term_pattern(term).pattern == expected
+
+
+def test_token_pattern_matches_non_word_terminators() -> None:
+    """``c++`` / ``.net`` must match where ``\\b`` could not."""
+    # \b requires a word char after the term, so \bc++\b could never match these.
+    assert token_pattern("c++").search("ships with c++ interop")
+    assert token_pattern("c++").search("C++ job")
+    # A digit directly before the term still blocks the match.
+    assert not token_pattern("c++").search("1c++")
+    assert not token_pattern("c++").search("basic c#")
+
+
+def test_token_pattern_avoids_substring_false_positives() -> None:
+    assert not token_pattern("ai").search("airport")
+    assert not token_pattern("ai").search("against")
+    assert token_pattern("ai").search("AI rules published")
+
+
+# ── 7. Truncation must stay inside the 64-byte cap ──────────────────────
+
+
+@pytest.mark.parametrize(
+    "topic",
+    [
+        "é" * 30,  # 3 bytes/char -> 180 bytes encoded
+        "融" * 25 + ":7",  # expansion + a colon that needs encoding
+        "x" * 40 + ":19",
+        "plain-long-topic-without-any-expansion-at-all-here",
+    ],
+)
+def test_truncated_encoded_value_round_trips(topic: str) -> None:
+    """A byte-clipped value must never leave a dangling ``%3`` escape."""
+    budget = helpers.CALLBACK_DATA_MAX_BYTES - len("unfollow:")
+    cut = helpers._truncate_encoded(helpers._encode_callback_value(topic), budget)
+
+    assert len(cut.encode("utf-8")) <= budget
+    decoded = helpers._decode_callback_value(cut)
+    # No partial escape: every '%' is followed by two hex digits.
+    assert not re.search("%(?![0-9A-Fa-f]{2})", cut)
+    assert helpers._decode_callback_value(helpers._encode_callback_value(decoded)) == decoded
+
+
+@pytest.mark.parametrize("topic", ["é" * 30, "融" * 25 + ":7"])
+async def test_trending_rows_fit_64_bytes_after_follow_flip(tmp_db: str, topic: str) -> None:
+    """``unfollow:`` is 2 bytes longer than ``follow:``; reserve it up front."""
+    # Follow the *truncated* form so the row must render "➖ Unfollow" for a
+    # value whose budget was sized while the label was still "➕ Follow".
+    encoded = helpers._encode_callback_value(helpers._sanitize_follow_topic(topic))
+    truncated = helpers._truncate_encoded(encoded, 64 - len("unfollow:"))
+    await db.add_followed_topic(1, helpers._decode_callback_value(truncated))
+
+    rows = await helpers._build_trending_topic_rows(1, [topic])
+
+    payloads = [cast(str, btn.callback_data) for row in rows for btn in row]
+    assert payloads, "buttons must still be produced"
+    assert any(p.startswith("unfollow:") for p in payloads)
+    assert all(len(p.encode("utf-8")) <= 64 for p in payloads)
+
+
+def test_digest_keyboard_omits_button_rather_than_overflowing() -> None:
+    """A topic too long after encoding drops the button instead of >64 bytes."""
+    markup = helpers._build_digest_keyboard([], follow_topic="é" * 30)
+    if markup is not None:
+        for row in markup.inline_keyboard:
+            for btn in row:
+                assert len(cast(str, btn.callback_data).encode("utf-8")) <= 64
+
+    ok = helpers._build_digest_keyboard([], follow_topic="covid:19")
+    assert ok is not None
+    assert cast(str, ok.inline_keyboard[0][0].callback_data) == "follow:covid%3A19"
+
+
+# ── 8. Weak loop-keyed locks and non-silent cleanup ─────────────────────
+
+
+def test_http_client_locks_do_not_retain_dead_loops() -> None:
+    """A lock created for a closed loop must not be kept alive forever."""
+
+    async def make() -> asyncio.Lock:
+        # _http_client_lock() is sync and binds the lock to the *running* loop.
+        return cast(asyncio.Lock, nf._http_client_lock())
+
+    loop = asyncio.new_event_loop()
+    try:
+        lock = loop.run_until_complete(make())
+        assert lock in nf._http_client_locks.values()
+    finally:
+        loop.close()
+    del loop
+    gc.collect()
+
+    # Whatever loops are still referenced keep their entry; none that is closed
+    # may linger, otherwise the map grows for the lifetime of the process.
+    assert not any(key.is_closed() for key in nf._http_client_locks)
+
+
+def test_is_skippable_telegram_error_only_swallows_expected_noise() -> None:
+    # Expected "there is nothing to do here" cases.
+    for msg in [
+        "Bad Request: message to delete not found",
+        "Bad Request: message can't be deleted",
+        "Bad Request: message is too old",
+        "Bad Request: message identifier is not specified",
+    ]:
+        assert helpers.is_skippable_telegram_error(BadRequest(msg)) is True
+
+    # Everything else is a real failure and must be surfaced.
+    for exc in [
+        BadRequest("can't parse entities"),
+        BadRequest("message text is empty"),
+        BadRequest("CHAT_WRITE_FORBIDDEN"),
+        Forbidden("bot was blocked by the user"),
+        RuntimeError("boom"),
+    ]:
+        assert helpers.is_skippable_telegram_error(exc) is False
+
+
+async def test_search_callback_logs_unexpected_placeholder_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_db: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A genuine delete failure must be logged, not swallowed."""
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock(return_value=None)
+    status_msg.delete = AsyncMock(side_effect=BadRequest("can't parse entities"))
+
+    async def record_reply(text: str, *_args: Any, **_kwargs: Any) -> MagicMock:
+        return cast(MagicMock, status_msg)
+
+    status_msg.reply_text = AsyncMock(side_effect=record_reply)
+
+    query = MagicMock()
+    query.answer = AsyncMock(return_value=None)
+    query.message = MagicMock()
+    query.message.reply_text = AsyncMock(return_value=status_msg)
+
+    async def fake_search(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"articles": _long_articles(), "totalResults": 8}
+
+    async def fake_prefs(_chat_id: int, _default: str | None = None) -> dict[str, str]:
+        return {"country": "us"}
+
+    async def allow(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr("newsdrop.bot.callbacks.search_news", fake_search)
+    monkeypatch.setattr("newsdrop.bot.callbacks.get_user_prefs", fake_prefs)
+    monkeypatch.setattr("newsdrop.bot.callbacks.rate_limit_try_acquire", allow)
+
+    with caplog.at_level("WARNING", logger="newsdrop.bot.callbacks"):
+        await _handle_search_callback(cast(CallbackQuery, query), 1, "funding")
+
+    assert "Could not delete search placeholder" in caplog.text
