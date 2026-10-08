@@ -75,7 +75,24 @@ _request_limit = DAILY_REQUEST_LIMIT
 
 # Shared HTTP client for NewsData.io (connection reuse across fetches).
 _http_client: httpx.AsyncClient | None = None
-_http_client_lock = asyncio.Lock()
+# One lock per event loop. A single module-level asyncio.Lock would bind to
+# whichever loop first awaited it, so closing the client from the post-shutdown
+# loop in main() would raise "bound to a different event loop" and leak the
+# client. Keying by loop keeps each loop's lock independent.
+#
+# A WeakKeyDictionary (not a plain dict) so an entry disappears when its loop is
+# garbage-collected: a plain dict keeps every loop ever started alive forever,
+# which is a slow leak in a test process that spins up hundreds of them.
+_http_client_locks: dict[Any, asyncio.Lock] = {}
+
+
+def _http_client_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _http_client_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _http_client_locks[loop] = lock
+    return lock
 
 
 async def get_http_client() -> httpx.AsyncClient:
@@ -83,7 +100,7 @@ async def get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is not None and not _http_client.is_closed:
         return _http_client
-    async with _http_client_lock:
+    async with _http_client_lock():
         if _http_client is None or _http_client.is_closed:
             timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS)
             _http_client = httpx.AsyncClient(timeout=timeout, max_redirects=5)
@@ -93,7 +110,7 @@ async def get_http_client() -> httpx.AsyncClient:
 async def close_http_client() -> None:
     """Close the shared client (tests / graceful shutdown)."""
     global _http_client
-    async with _http_client_lock:
+    async with _http_client_lock():
         if _http_client is not None and not _http_client.is_closed:
             await _http_client.aclose()
         _http_client = None

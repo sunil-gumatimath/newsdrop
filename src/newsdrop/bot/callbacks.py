@@ -42,6 +42,7 @@ from .helpers import (
     _build_digest_payload,
     _clear_chat_messages,
     _country_name_from_code,
+    _decode_callback_value,
     _effective_chat_id,
     _escape_html,
     _parse_callback_data,
@@ -197,7 +198,6 @@ def _extract_ownership_user_id(update: Update, action: str) -> int | None:
 async def _handle_obnews_callback(query: CallbackQuery, chat_id: int) -> None:
     """Finish onboarding by sending a live briefing in-place."""
     if not await rate_limit_try_acquire(NEWS_RATE_LIMIT_SCOPE, chat_id, _NEWS_COOLDOWN_SECONDS):
-        await increment(COMMAND_NEWS)
         _ = await query.answer(
             f"⏳ Please wait {_NEWS_COOLDOWN_SECONDS}s before requesting news again.",
             show_alert=True,
@@ -440,7 +440,7 @@ async def _handle_search_callback(
     chat_id: int,
     value: str,
 ) -> None:
-    topic = _sanitize_follow_topic(value)
+    topic = _sanitize_follow_topic(_decode_callback_value(value))
     if not topic:
         _ = await query.edit_message_text("⚠️ Invalid search topic.")
         return
@@ -472,13 +472,31 @@ async def _handle_search_callback(
                 reply_markup=result.reply_markup,
             )
         elif result.digest is not None:
-            text = result.digest if len(result.digest) <= 4096 else result.digest[:3990] + "…"
-            _ = await status_msg.edit_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-                reply_markup=result.reply_markup,
-            )
+            if len(result.digest) <= 4096:
+                _ = await status_msg.edit_text(
+                    result.digest,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=result.reply_markup,
+                )
+            else:
+                # Never truncate raw HTML: a cut inside <b>/<a> makes Telegram
+                # reject the message with "Can't find end tag". chunk_message
+                # balances tags across chunks instead.
+                with contextlib.suppress(Exception):
+                    await status_msg.delete()
+                await send_chunked_message(
+                    status_msg,
+                    result.digest,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                if result.reply_markup is not None:
+                    with contextlib.suppress(Exception):
+                        _ = await status_msg.reply_text(
+                            "📖 Open results / follow topic:",
+                            reply_markup=result.reply_markup,
+                        )
         # rate limit was already acquired atomically at the top of this handler
     except APIClientError:
         logger.exception("Callback search failed")
@@ -489,7 +507,7 @@ async def _handle_search_callback(
 
 
 async def _handle_follow_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
-    topic = _sanitize_follow_topic(value)
+    topic = _sanitize_follow_topic(_decode_callback_value(value))
     created, result = await add_followed_topic(chat_id, topic)
     if query.message:
         if created:
@@ -502,7 +520,7 @@ async def _handle_follow_callback(query: CallbackQuery, chat_id: int, value: str
 
 
 async def _handle_unfollow_callback(query: CallbackQuery, chat_id: int, value: str) -> None:
-    topic = _sanitize_follow_topic(value)
+    topic = _sanitize_follow_topic(_decode_callback_value(value))
     removed = await remove_followed_topic(chat_id, topic)
     if query.message:
         if removed:

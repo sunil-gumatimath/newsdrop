@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from telegram import (
     Bot,
@@ -188,6 +188,15 @@ def _normalize_topic(topic: str) -> str:
     return " ".join(topic.strip().split())
 
 
+def _token_pattern(term: str) -> re.Pattern[str]:
+    """Whole-token pattern shared with the search / breaking-alert matchers.
+
+    Letters or digits on either side block the match, so ``ai`` does not hit
+    ``airport`` while ``c++`` still matches.
+    """
+    return re.compile(rf"(?<![a-z0-9]){re.escape(term.strip().lower())}(?![a-z0-9])", re.IGNORECASE)
+
+
 def _format_relative_time(iso_timestamp: str) -> str:
     """Return a humanized 'time ago' string for a Telegram message.
 
@@ -337,8 +346,7 @@ def _match_followed_topics(article: Article, followed_topics: list[str] | None) 
         q = topic.lower().strip()
         if not q:
             continue
-        pattern = re.compile(rf"(?<![a-z0-9]){re.escape(q)}(?![a-z0-9])", re.IGNORECASE)
-        if pattern.search(blob):
+        if _token_pattern(q).search(blob):
             hits.append(topic)
     return hits
 
@@ -418,7 +426,7 @@ def _build_digest_keyboard(
 
     topic = _sanitize_follow_topic(follow_topic or "")
     if topic:
-        cb = f"follow:{topic}"
+        cb = f"follow:{_encode_callback_value(topic)}"
         if len(cb.encode("utf-8")) <= 64:
             rows.append([InlineKeyboardButton(f"➕ Follow #{topic}", callback_data=cb)])
 
@@ -485,7 +493,10 @@ def format_breaking_alert(
 
     # Prefer the strongest signal: keywords that hit the title.
     title_l = str(article.get("title", "")).lower()
-    title_hits = [k for k in matched_keywords if re.search(rf"\b{re.escape(k.lower())}\b", title_l)]
+    # Use the same whole-token idiom as jobs._keyword_pattern: ``\b`` fails for
+    # topics that end in a non-word character (``c++``, ``.net``) and would
+    # drop them from the displayed "Matched #…" reason.
+    title_hits = [k for k in matched_keywords if _token_pattern(k).search(title_l)]
     shown_kw = title_hits or matched_keywords
     kw_label = ", ".join(f"#{_escape_html(k)}" for k in shown_kw[:3])
 
@@ -669,6 +680,24 @@ def _get_article_key(article: Article) -> str:
     return f"{title}|{published_at}"
 
 
+def _encode_callback_value(value: str) -> str:
+    """Percent-encode a free-text callback value (topic names).
+
+    Callback payloads are ``<action>:<value>[:<user_id>]`` and the trailing
+    ``:<user_id>`` segment is treated as an ownership marker when it is all
+    digits. A topic that itself contains a colon plus digits (``covid:19``,
+    ``ratio:3``) would therefore be mis-parsed: the tap gets rejected as
+    "Not your session" and the value is truncated to ``covid``. Encoding the
+    value keeps it a single colon-free segment.
+    """
+    return quote(value, safe="")
+
+
+def _decode_callback_value(value: str) -> str:
+    """Inverse of :func:`_encode_callback_value` (safe on plain values)."""
+    return unquote(value)
+
+
 def _parse_callback_data(data: str) -> tuple[str, str] | None:
     if ":" not in data:
         return None
@@ -701,25 +730,25 @@ async def _build_trending_topic_rows(
         follow_label = "➖ Unfollow" if follow_action == "unfollow" else "➕ Follow"
 
         # Ensure callback_data stays within Telegram's 64-byte limit.
-        for prefix in (f"search:{safe_topic}", f"{follow_action}:{safe_topic}"):
-            if len(prefix.encode("utf-8")) > 64:
-                # Truncate topic to fit within 64 bytes with the prefix.
-                prefix_bytes = prefix.encode("utf-8")
-                topic_bytes = safe_topic.encode("utf-8")
-                overflow = len(prefix_bytes) - 64
-                safe_topic = topic_bytes[: len(topic_bytes) - overflow - 1].decode(
-                    "utf-8", errors="ignore"
-                )
-                follow_action = (
-                    "unfollow" if await is_following_topic(chat_id, safe_topic) else "follow"
-                )
-                follow_label = "➖ Unfollow" if follow_action == "unfollow" else "➕ Follow"
-                break
+        # Values are percent-encoded first so a colon inside a topic can never
+        # be mistaken for the ``:<user_id>`` ownership segment.
+        encoded = _encode_callback_value(safe_topic)
+        longest_prefix = max(len(f"search:{encoded}"), len(f"{follow_action}:{encoded}"))
+        if longest_prefix > 64:
+            # Truncate the encoded topic so ``follow:`` + value fits in 64 bytes.
+            encoded = encoded.encode("utf-8")[: 64 - len(f"{follow_action}:")].decode(
+                "utf-8", errors="ignore"
+            )
+            safe_topic = _decode_callback_value(encoded)
+            follow_action = (
+                "unfollow" if await is_following_topic(chat_id, safe_topic) else "follow"
+            )
+            follow_label = "➖ Unfollow" if follow_action == "unfollow" else "➕ Follow"
 
         rows.append(
             [
-                InlineKeyboardButton("🔍 Search", callback_data=f"search:{safe_topic}"),
-                InlineKeyboardButton(follow_label, callback_data=f"{follow_action}:{safe_topic}"),
+                InlineKeyboardButton("🔍 Search", callback_data=f"search:{encoded}"),
+                InlineKeyboardButton(follow_label, callback_data=f"{follow_action}:{encoded}"),
             ]
         )
 
@@ -904,6 +933,9 @@ def build_export_html(
         for i, article in enumerate(shown, 1):
             title = _escape_html(article.get("title", "No title"))
             url = _safe_url(article.get("url", ""))
+            # Escape unconditionally: the "Read full story" link below is a
+            # separate `if url:` block and must never see an unbound name.
+            escaped_url = html.escape(url, quote=True)
             blurb = _article_blurb(article, max_length=220)
             rel_time = _format_relative_time(str(article.get("publishedAt", "")))
             _, source_escaped = _get_source_name(article)
@@ -929,7 +961,6 @@ def build_export_html(
 
             parts.append('<article class="card">')
             if url:
-                escaped_url = html.escape(url, quote=True)
                 parts.append(f'<h2>{i}. <a href="{escaped_url}">{title}</a></h2>')
             else:
                 parts.append(f"<h2>{i}. {title}</h2>")
@@ -1003,6 +1034,18 @@ async def _send_trending_results(
         await status_msg.edit_text("🔧 Failed to fetch trending topics. Please try again later.")
 
 
+# BadRequest texts that simply mean "there is nothing deletable here".
+# Kept as a module constant so the membership test stays a single expression.
+_TELEGRAM_SKIP_MARKERS = (
+    "not found",
+    "can't be deleted",
+    "message to delete not found",
+    "message can't be deleted",
+    "message is too old",
+    "message identifier is not specified",
+)
+
+
 async def _clear_chat_messages(
     bot: Bot,
     chat_id: int,
@@ -1044,14 +1087,7 @@ async def _clear_chat_messages(
             continue
         except BadRequest as exc:
             s = str(exc).lower()
-            if (
-                "not found" in s
-                or "can't be deleted" in s
-                or "message to delete not found" in s
-                or "message can't be deleted" in s
-                or "message is too old" in s
-                or "message identifier is not specified" in s
-            ):
+            if any(marker in s for marker in _TELEGRAM_SKIP_MARKERS):
                 skipped += 1
                 continue
             logger.warning("clear_chat BadRequest for message %s: %s", msg_id, exc)

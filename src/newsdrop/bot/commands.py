@@ -984,7 +984,8 @@ async def export_briefing(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         data = await fetch_top_headlines(country, category)
         html_doc = build_export_html(data, category, country, followed)
         filename = f"newsdrop-{category}-{country}-{datetime.now(UTC).strftime('%Y-%m-%d')}.html"
-        buf = io.BytesIO(html_doc.encode("utf-8"))
+        payload = html_doc.encode("utf-8")
+        buf = io.BytesIO(payload)
         # PTB reads .name if present for filename fallback
         buf.name = filename  # noqa: E501
         with contextlib.suppress(Exception):
@@ -994,7 +995,7 @@ async def export_briefing(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
             filename=filename,
             caption=(  # noqa: E501
                 f"📰 Your briefing — {category.capitalize()} · {country.upper()}  "
-                f"·  {len(html_doc)} bytes HTML"
+                f"·  {len(payload)} bytes HTML"
             ),
         )
     except APIClientError:

@@ -239,7 +239,6 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     sent_count = 0
-    per_user_sent: dict[int, int] = {}
 
     for article in articles[:30]:
         country = str(article.get("country", ""))
@@ -308,7 +307,6 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
                     await asyncio.sleep(max(delay, 0.0))
                     await context.bot.send_message(**send_kwargs)
                 sent_count += 1
-                per_user_sent[chat_id] = next_count
                 await increment(BREAKING_ALERTS_SENT)
             except Exception as exc:
                 logger.exception(
@@ -414,32 +412,34 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("No users to send daily news to.")
         return
 
-    due: list[int] = []
+    # Single pass over users: decide who is due and group them by combo at
+    # the same time. Loading prefs twice (once to test due-ness, once to
+    # group) doubled the SQLite round-trips for every user, every hour.
+    grouped: dict[tuple[str, str], list[int]] = {}
+    due_count = 0
     for chat_id in user_ids:
         prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
-        if is_digest_due(prefs):
-            due.append(chat_id)
+        if not is_digest_due(prefs):
+            continue
+        due_count += 1
+        country = prefs.get("country", DEFAULT_COUNTRY)
+        category = prefs.get("category", "general")
+        grouped.setdefault((country, category), []).append(chat_id)
 
-    if not due:
+    if not grouped:
         logger.info(
             "No users due for daily news this hour (checked %s).",
             len(user_ids),
         )
         return
 
-    logger.info("Sending daily news to %s due subscriber(s)...", len(due))
-
-    # Group subscribers by (country, category) so we only fetch once per combo.
-    grouped: dict[tuple[str, str], list[int]] = {}
-    for chat_id in due:
-        prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
-        country = prefs.get("country", DEFAULT_COUNTRY)
-        category = prefs.get("category", "general")
-        grouped.setdefault((country, category), []).append(chat_id)
-
+    logger.info(
+        "Sending daily news to %s due subscriber(s)...",
+        due_count,
+    )
     logger.info(
         "Grouped %s users into %s unique (country, category) combos.",
-        len(due),
+        due_count,
         len(grouped),
     )
 

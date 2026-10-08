@@ -200,7 +200,7 @@ def _migrate_user_preferences(conn: sqlite3.Connection) -> None:
         )
         """
         )
-    return
+        return
 
     columns = _get_columns(conn, "user_preferences")
 
@@ -978,6 +978,10 @@ def _claim_breaking_alert_slot_sync(
     with _lock:
         conn = _get_connection()
         try:
+            # BEGIN IMMEDIATE takes the write lock up front, so the cap count
+            # and the dedupe INSERT below form one atomic unit — matching the
+            # docstring's guarantee even if a second worker races this call.
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 """
                 SELECT COUNT(*) AS count
@@ -990,6 +994,7 @@ def _claim_breaking_alert_slot_sync(
             row = cursor.fetchone()
             today_count = int(row["count"]) if row else 0
             if today_count >= max_per_day:
+                conn.rollback()
                 return False
 
             insert_cursor = conn.execute(
@@ -1011,6 +1016,9 @@ def _claim_breaking_alert_slot_sync(
             )
             conn.commit()
             return insert_cursor.rowcount > 0
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
