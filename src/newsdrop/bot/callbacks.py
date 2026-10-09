@@ -149,6 +149,12 @@ async def _handle_obsub_callback(query: CallbackQuery, chat_id: int, value: str)
 
 # Actions whose buttons mutate chat state or trigger API spend. Their callback
 # payloads carry the originating user's id as a trailing ":<user_id>" segment.
+#
+# "search" is deliberately absent: the trending-topics keyboard posts 🔍 Search
+# buttons into group chats, and any member is allowed to run a search there
+# (it is still bounded by SEARCH_COOLDOWN_SECONDS and the daily API budget).
+# It mutates no stored state for the tapper. Callers that need the old
+# behaviour can gate it themselves.
 _OWNED_CALLBACK_ACTIONS = frozenset(
     {
         "country",
@@ -453,19 +459,29 @@ async def _handle_search_callback(
 ) -> None:
     topic = _sanitize_follow_topic(_decode_callback_value(value))
     if not topic:
+        await query.answer()
         _ = await query.edit_message_text("⚠️ Invalid search topic.")
         return
 
     if not query.message:
+        await query.answer()
         _ = await query.edit_message_text("⚠️ Search message is unavailable.")
         return
 
     if not await rate_limit_try_acquire(SEARCH_RATE_LIMIT_SCOPE, chat_id, SEARCH_COOLDOWN_SECONDS):
+        # This is the one branch that answers with a toast; every other path
+        # below answers plainly instead, so the query is answered exactly once.
         _ = await query.answer(
             f"⏳ Please wait {SEARCH_COOLDOWN_SECONDS}s before searching again.",
             show_alert=True,
         )
         return
+
+    # `button_handler` skips the shared `query.answer()` for "search", so this
+    # handler owns answering. Do it *before* the slow search below — otherwise
+    # every successful tap leaves the client's button spinner running until it
+    # times out.
+    await query.answer()
 
     prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
     country = prefs.get("country", DEFAULT_COUNTRY)
@@ -688,8 +704,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer("Not your session.", show_alert=True)
         return
 
-    # Answer the query once, here, for all branches that do NOT answer it
-    # themselves (e.g. the search rate-limit alert answers its own query).
+    # Answer the query once, here, for every branch except "search".
+    # `_handle_search_callback` answers its own queries — the rate-limit
+    # branch with a toast, all other paths plainly — so it must not be
+    # answered twice.
     if action != "search":
         await query.answer()
 

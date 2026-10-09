@@ -755,12 +755,18 @@ def _parse_callback_data(data: str) -> tuple[str, str] | None:
 
 
 def _get_source_name(article: Article) -> tuple[str, str]:
-    """Return (raw_source_name, escaped_source_name)."""
+    """Return (raw_source_name, escaped_source_name).
+
+    Mirrors ``story_utils.source_name``: a bare-string ``source`` is honoured
+    rather than reported as "Unknown", so a differently-shaped feed cannot
+    silently blank out the source in the digest meta line.
+    """
     source_obj = article.get("source", {})
     if isinstance(source_obj, dict):
-        raw = str(source_obj.get("name", "Unknown"))
-        return raw, _escape_html(raw)
-    return "Unknown", "Unknown"
+        raw = str(source_obj.get("name", "") or "Unknown")
+    else:
+        raw = str(source_obj or "Unknown")
+    return raw, _escape_html(raw)
 
 
 async def _build_trending_topic_rows(
