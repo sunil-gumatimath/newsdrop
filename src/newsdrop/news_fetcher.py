@@ -268,14 +268,22 @@ def _normalize_response(data: NewsResponse) -> NewsResponse:
     }
 
 
-async def _fetch_news(params: Params) -> NewsResponse:
-    cache_key = _get_cache_key(params)
-    cached = await cache_get(cache_key)
-    if isinstance(cached, dict):
-        return cached
+async def _reserve_api_slot() -> None:
+    """Atomically claim one unit of the daily API budget, or raise.
 
-    # 0 means unlimited per config — skip budget gate.
-    if _request_limit != 0 and not await api_budget_check(_request_limit):
+    Reserving and deciding in a single ``consume`` call is what makes the
+    free-tier cap enforceable: a separate ``check`` followed by ``consume``
+    is a TOCTOU race, so N concurrent workers could all pass the check and
+    each spend a request (see ``_claim_breaking_alert_slot`` for the same
+    discipline applied to breaking alerts).
+
+    A slot is charged once per *logical* fetch, including when every retry
+    attempt fails — a degraded-API window must not multiply free-tier spend.
+    A cached response costs nothing and returns before this is called.
+    """
+    if _request_limit == 0:  # 0 == unlimited
+        return
+    if not await api_request_consume(_request_limit):
         current, limit = await get_request_count()
         raise APIClientError(
             f"Daily API request limit reached ({current}/{limit}). "
@@ -284,13 +292,19 @@ async def _fetch_news(params: Params) -> NewsResponse:
             api_code="RateLimitExceeded",
         )
 
+
+async def _fetch_news(params: Params) -> NewsResponse:
+    cache_key = _get_cache_key(params)
+    cached = await cache_get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    # Reserve the single budget unit this whole attempt cycle will cost.
+    await _reserve_api_slot()
+
     max_attempts = 3
     last_exc: Exception | None = None
     client = await get_http_client()
-    # Consume the API budget once for the whole logical fetch attempt cycle
-    # (including retries), so a degraded-API window with retries cannot burn
-    # ~3x the free-tier spend. The budget gate above already reserved the
-    # request; commit the consumption here.
     for attempt in range(max_attempts):
         try:
             try:
@@ -344,8 +358,6 @@ async def _fetch_news(params: Params) -> NewsResponse:
 
             normalized = _normalize_response(data)
             await cache_set(cache_key, normalized, CACHE_TTL_SECONDS)
-            if _request_limit != 0:
-                await api_request_consume(_request_limit)
             return normalized
 
         except (APIClientError, RuntimeError) as exc:
@@ -372,12 +384,6 @@ async def _fetch_news(params: Params) -> NewsResponse:
                     delay,
                 )
                 await asyncio.sleep(delay)
-
-    # Consume the budget exactly once per logical fetch attempt cycle — even
-    # when the API was degraded and every attempt failed — so retries cannot
-    # multiply free-tier spend.
-    if _request_limit != 0:
-        await api_request_consume(_request_limit)
 
     if last_exc is not None:
         raise last_exc
@@ -718,22 +724,49 @@ async def search_news(query: str, country: str = "us", language: str = "en") -> 
     }
 
 
+def _tag_breaking(
+    articles: list[Article],
+    keywords: list[str],
+    country: str,
+) -> list[Article]:
+    """Return copies of *articles* that trip the alert rules, tagged with country.
+
+    A **title** hit is enough. A body-only match needs at least two keywords,
+    so one incidental word in a description does not fire an alert.
+    """
+    matched_out: list[Article] = []
+    for article in articles:
+        title = str(article.get("title", "")).lower()
+        description = str(article.get("description", "")).lower()
+        combined = f"{title} {description}"
+
+        matched = [kw for kw in keywords if _keyword_pattern(kw).search(combined)]
+        title_hits = [kw for kw in matched if _keyword_pattern(kw).search(title)]
+        if title_hits or len(matched) >= 2:
+            tagged = dict(article)
+            tagged["country"] = country
+            matched_out.append(tagged)
+    return matched_out
+
+
 async def fetch_breaking_news(
-    countries: list[str], keywords: list[str], language: str = "en"
+    countries: list[str],
+    keywords: list[str],
+    language: str = "en",
 ) -> list[Article]:
     """Fetch breaking news from the NewsData.io API, with RSS fallback.
 
-    The budget gate protects the API. RSS feeds have zero API cost, so we
-    always check them — if the API is down or the budget is exhausted,
-    RSS headlines are still scanned for keyword matches.
+    RSS feeds have zero API cost, so they are always scanned — if the API is
+    down or the budget is exhausted, RSS headlines are still matched.
     """
     breaking_articles: list[Article] = []
 
     for country in countries:
-        # Rate-limit gate: if the daily budget is gone, log once and bail out
-        # of the whole country loop (do not "continue" — remaining countries
-        # would just hit the same gate and spam the log).
-        # 0 == unlimited, so skip gate entirely.
+        # Advisory pre-gate: bail out of the whole country loop rather than
+        # "continue", so remaining countries do not each re-log the same
+        # exhaustion. This is an optimisation only — `_fetch_news` enforces
+        # the budget atomically via `_reserve_api_slot`, so a race here is
+        # harmless. 0 == unlimited, so skip the gate entirely.
         if _request_limit != 0 and not await api_budget_check(_request_limit):
             current, limit = await get_request_count()
             logger.warning(
@@ -756,49 +789,23 @@ async def fetch_breaking_news(
         if api_country:
             params["country"] = api_country
 
-        cache_key = _get_cache_key(params)
-        cached = await cache_get(cache_key)
-        if cached:
-            raw_articles = cached.get("articles", [])
+        # `_fetch_news` performs its own cache read, so no separate lookup
+        # is needed here — it is charged a budget slot only on a real miss.
+        try:
+            data = await _fetch_news(params)
+            raw_articles = data.get("articles", [])
             articles = raw_articles if isinstance(raw_articles, list) else []
-        else:
-            try:
-                data = await _fetch_news(params)
-                raw_articles = data.get("articles", [])
-                articles = raw_articles if isinstance(raw_articles, list) else []
-            except Exception:
-                # API failed for this country — articles stays empty; we'll
-                # fall through to RSS below.
-                articles = []
+        except Exception:
+            # API failed for this country — articles stays empty; we fall
+            # through to the zero-cost RSS scan below.
+            articles = []
 
-        for article in articles:
-            title = str(article.get("title", "")).lower()
-            description = str(article.get("description", "")).lower()
-            combined = f"{title} {description}"
+        breaking_articles.extend(_tag_breaking(articles, keywords, country))
 
-            matched = [kw for kw in keywords if _keyword_pattern(kw).search(combined)]
-            title_hits = [kw for kw in matched if _keyword_pattern(kw).search(title)]
-            if title_hits or len(matched) >= 2:
-                tagged = dict(article)
-                tagged["country"] = country
-                breaking_articles.append(tagged)
-
-        # RSS fallback: zero-cost scan of feeds for the same country.
-        # If the API returned nothing or failed entirely, RSS may still have
-        # breaking headlines. We apply the same keyword+tagging logic so
-        # RSS-only breaking articles are indistinguishable from API ones.
+        # RSS fallback: same keyword rules, so RSS-only breaking articles are
+        # indistinguishable from API ones.
         rss_articles = await _safe_fetch_rss(country, limit=20, category="general")
-        for article in rss_articles:
-            title = str(article.get("title", "")).lower()
-            description = str(article.get("description", "")).lower()
-            combined = f"{title} {description}"
-
-            matched = [kw for kw in keywords if _keyword_pattern(kw).search(combined)]
-            title_hits = [kw for kw in matched if _keyword_pattern(kw).search(title)]
-            if title_hits or len(matched) >= 2:
-                tagged = dict(article)
-                tagged["country"] = country
-                breaking_articles.append(tagged)
+        breaking_articles.extend(_tag_breaking(rss_articles, keywords, country))
 
     return breaking_articles
 
@@ -965,24 +972,20 @@ async def _fetch_trending_for_country(
             params["category"] = mapped_category
 
         articles: list[Article] = []
-        cache_key = _get_cache_key(params)
-        cached = await cache_get(cache_key)
-        if cached:
-            raw_articles = cached.get("articles", [])
+        # `_fetch_news` reads the cache itself, so no separate lookup here —
+        # it is charged a budget slot only on a genuine miss.
+        try:
+            data = await _fetch_news(params)
+            raw_articles = data.get("articles", [])
             articles = raw_articles if isinstance(raw_articles, list) else []
-        else:
-            try:
-                data = await _fetch_news(params)
-                raw_articles = data.get("articles", [])
-                articles = raw_articles if isinstance(raw_articles, list) else []
-            except Exception as exc:
-                # An API failure must not skip the country entirely: RSS
-                # below still contributes at zero API cost.
-                logger.warning(
-                    "Trending NewsData fetch failed for %s, using RSS only: %s",
-                    country,
-                    exc,
-                )
+        except Exception as exc:
+            # An API failure must not skip the country entirely: RSS
+            # below still contributes at zero API cost.
+            logger.warning(
+                "Trending NewsData fetch failed for %s, using RSS only: %s",
+                country,
+                exc,
+            )
 
         # RSS always contributes, even when the API failed.
         rss_articles = await _safe_fetch_rss(country, limit=20, category=category)

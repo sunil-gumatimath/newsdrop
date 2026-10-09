@@ -68,8 +68,6 @@ SOURCE_TRUST: dict[str, float] = {
 }
 
 _DEFAULT_TRUST = 0.5
-_TITLE_SIMILARITY_THRESHOLD = 0.62
-_MIN_TITLE_CHARS = 20
 
 # Ranking weights (tunable).
 _W_TRUST = 3.0
