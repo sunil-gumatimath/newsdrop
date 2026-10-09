@@ -13,7 +13,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,11 @@ try:
     from redis.asyncio import Redis
 except ImportError:  # pragma: no cover
     Redis = None  # type: ignore[misc, assignment]
+
+
+def _utc_today() -> date:
+    """Current UTC calendar day (the boundary for the daily API budget)."""
+    return datetime.now(tz=UTC).date()
 
 
 def _safe_int(value: object, default: int = 0) -> int:
@@ -91,8 +96,12 @@ class _MemoryBackend(StateBackend):
         # Cache stores (monotonic_timestamp, value, ttl_seconds). Using
         # time.monotonic() avoids wall-clock jumps (NTP, DST) breaking TTLs.
         self._cache: dict[str, tuple[float, StateValue, int]] = {}
+        # The API-budget day rolls over at UTC midnight, matching the Redis
+        # backend's key and the SQLite side of the breaking-alert cap. Using
+        # local ``date.today()`` here made the two day boundaries disagree for
+        # deployments running outside UTC.
         self._daily_count = 0
-        self._daily_date = date.today()
+        self._daily_date = _utc_today()
         # Rate limits store expiry monotonic time per entry so cleanup can
         # respect per-entry TTL (not per-call cooldown).
         self._rate_limits: dict[str, float] = {}
@@ -104,7 +113,7 @@ class _MemoryBackend(StateBackend):
         return ":".join(parts)
 
     def _reset_day_if_needed(self) -> None:
-        today = date.today()
+        today = _utc_today()
         if today != self._daily_date:
             self._daily_count = 0
             self._daily_date = today
@@ -175,6 +184,12 @@ class _MemoryBackend(StateBackend):
                     del self._rate_limits[k]
                 if expired:
                     logger.info("Rate-limit cleanup: removed %d expired entries", len(expired))
+            # A 0s cooldown allows every request, so there is no state to
+            # record. Mirrors the Redis backend's `cooldown_seconds <= 0`
+            # short-circuit and stops one entry accumulating per chat when
+            # cooldowns are disabled (the default for solo deployments).
+            if cooldown_seconds <= 0:
+                return True
             key = self._key(scope, str(chat_id))
             expiry = self._rate_limits.get(key)
             now = asyncio.get_running_loop().time()
@@ -205,17 +220,17 @@ class _RedisBackend(StateBackend):
         # Short-lived local fallback counter for the DAILY API BUDGET so a
         # Redis outage cannot silently un-limit free-tier spend (fail-closed).
         self._budget_fallback_count = 0
-        self._budget_fallback_date = date.today()
+        self._budget_fallback_date = _utc_today()
 
     @staticmethod
     def _key(*parts: str) -> str:
         return ":".join(["newsdrop", *parts])
 
     def _today(self) -> str:
-        return date.today().isoformat()
+        return _utc_today().isoformat()
 
     def _reset_budget_fallback_if_needed(self) -> None:
-        today = date.today()
+        today = _utc_today()
         if today != self._budget_fallback_date:
             self._budget_fallback_count = 0
             self._budget_fallback_date = today

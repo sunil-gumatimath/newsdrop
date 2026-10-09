@@ -36,6 +36,23 @@ def _safe_int_env(name: str, default: int) -> int:
         return default
 
 
+def _env_flag(name: str, default: str = "1") -> bool:
+    """Parse a boolean env var leniently.
+
+    Accepts any capitalisation of the usual negatives (``0``, ``false``,
+    ``no``, ``off``, ``n``, ``disabled``) and treats anything else present as
+    true. Without this, ``ENABLE_RSS=FALSE`` silently reads as *enabled* —
+    a foot-gun that only shows up in production.
+
+    An unset or whitespace-only variable falls back to *enabled*, matching the
+    historical behaviour of these flags.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        raw = default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y", "enabled", ""}
+
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if TELEGRAM_BOT_TOKEN:
     TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN.strip()
@@ -75,10 +92,10 @@ DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "")
 
 # Multi-source support. Set ENABLE_RSS=0 to disable RSS augmentation.
-ENABLE_RSS = os.getenv("ENABLE_RSS", "1") not in ("0", "false", "False", "no")
+ENABLE_RSS = _env_flag("ENABLE_RSS")
 
 # Hacker News Algolia — free, no API key (https://hn.algolia.com/api)
-ENABLE_HN = os.getenv("ENABLE_HN", "1") not in ("0", "false", "False", "no")
+ENABLE_HN = _env_flag("ENABLE_HN")
 HN_HITS_PER_PAGE = _safe_int_env("HN_HITS_PER_PAGE", 10)
 
 # NewsData.io free tier request budget. Set to 0 to disable local request limiting.
@@ -100,12 +117,7 @@ BREAKING_ALERT_INTERVAL_MINUTES = _safe_int_env("BREAKING_ALERT_INTERVAL_MINUTES
 BREAKING_ALERT_RETENTION_DAYS = _safe_int_env("BREAKING_ALERT_RETENTION_DAYS", 14)
 BREAKING_ALERT_MAX_PER_DAY = _safe_int_env("BREAKING_ALERT_MAX_PER_DAY", 5)
 # When True, followed topics are used as alert keywords for opted-in users.
-BREAKING_USE_FOLLOWED_TOPICS = os.getenv("BREAKING_USE_FOLLOWED_TOPICS", "1") not in (
-    "0",
-    "false",
-    "False",
-    "no",
-)
+BREAKING_USE_FOLLOWED_TOPICS = _env_flag("BREAKING_USE_FOLLOWED_TOPICS")
 BREAKING_ALERT_KEYWORDS = [
     keyword.strip()
     for keyword in os.getenv(
