@@ -175,6 +175,21 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_breaking_alerts_sent_at
         ON breaking_alerts (sent_at);
+
+        -- Daily-digest delivery ledger. Without it the hourly tick can send a
+        -- user two digests in the same local hour: the job is scheduled with
+        -- first=30s after boot, so a restart during a user's digest hour fires
+        -- the boot run *and* the regular run. The DST fall-back hour is
+        -- likewise visited twice by the local clock.
+        CREATE TABLE IF NOT EXISTS daily_digest_sent (
+            chat_id INTEGER NOT NULL,
+            digest_key TEXT NOT NULL,
+            sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chat_id, digest_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_daily_digest_sent_at
+        ON daily_digest_sent (sent_at);
         """
     )
 
@@ -1038,3 +1053,67 @@ async def claim_breaking_alert_slot(
         article_title,
         max_per_day,
     )
+
+
+# ── Daily digest delivery ledger ─────────────────────────────────────────
+
+
+def _claim_daily_digest_slot_sync(chat_id: int, digest_key: str) -> bool:
+    """Atomically claim the daily-digest send slot for a user.
+
+    Returns True the first time a given ``(chat_id, digest_key)`` pair is
+    claimed and False on every subsequent claim for the same key. ``digest_key``
+    is the user's *local* calendar day (plus a slot suffix for twice-daily),
+    so a boot-time run plus the regular hourly run — or a DST fall-back hour —
+    collapse into a single delivery.
+    """
+    normalized_key = _normalize_alert_key(digest_key)
+    if not normalized_key:
+        return False
+
+    with _lock:
+        conn = _get_connection()
+        try:
+            # BEGIN IMMEDIATE makes the read-then-insert atomic, so two
+            # overlapping job runs cannot both claim the same slot.
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO daily_digest_sent (chat_id, digest_key)
+                VALUES (?, ?)
+                """,
+                (chat_id, normalized_key),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+async def claim_daily_digest_slot(chat_id: int, digest_key: str) -> bool:
+    return await asyncio.to_thread(_claim_daily_digest_slot_sync, chat_id, digest_key)
+
+
+def _cleanup_old_daily_digests_sync(days: int = 14) -> int:
+    """Delete daily-digest ledger rows older than *days*; return count removed."""
+    retention_days = max(int(days), 1)
+    with _lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute(
+                f"""
+                DELETE FROM daily_digest_sent
+                WHERE sent_at < datetime('now', '-{retention_days} days')
+                """
+            )
+            conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
+        finally:
+            conn.close()
+
+
+async def cleanup_old_daily_digests(days: int = 14) -> int:
+    return await asyncio.to_thread(_cleanup_old_daily_digests_sync, days)

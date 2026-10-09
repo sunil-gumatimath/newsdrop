@@ -22,7 +22,9 @@ from ..config import (
 )
 from ..database import (
     claim_breaking_alert_slot,
+    claim_daily_digest_slot,
     cleanup_old_breaking_alerts,
+    cleanup_old_daily_digests,
     count_breaking_alerts_today,
     get_followed_topics,
     get_user_prefs,
@@ -93,6 +95,26 @@ def is_digest_due(prefs: dict[str, str], now: datetime | None = None) -> bool:
         return local.hour == preferred_hour
 
     return local.hour == preferred_hour
+
+
+def digest_dedupe_key(prefs: dict[str, str], now: datetime | None = None) -> str:
+    """Return the once-per-day delivery key for a user's digest.
+
+    Keyed on the user's **local** calendar day rather than UTC so the ledger
+    matches what "one digest a day" means to the user. ``twice`` appends the
+    hour slot so the 08:00 and 20:00 digests are tracked independently.
+
+    Because the key is derived from the local date, a DST fall-back — which
+    visits the same local hour twice — does not deliver a second digest.
+    """
+    now = now or datetime.now(UTC)
+    tz = _safe_zoneinfo(prefs.get("timezone") or DEFAULT_TIMEZONE)
+    local = now.astimezone(tz)
+    freq = str(prefs.get("digest_frequency") or "daily").strip().lower()
+    if freq == "twice":
+        slot = "am" if local.hour < 12 else "pm"
+        return f"{local:%Y-%m-%d}:{slot}"
+    return f"{local:%Y-%m-%d}"
 
 
 def is_in_quiet_hours(prefs: dict[str, str], now: datetime | None = None) -> bool:
@@ -190,14 +212,12 @@ async def send_breaking_news_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Prefs + keywords per chat; also collect countries and union keywords for fetch.
-    chat_prefs: dict[int, dict[str, str]] = {}
     chat_keywords: dict[int, list[str]] = {}
     country_to_chats: dict[str, list[int]] = {}
     country_keyword_union: dict[str, set[str]] = {}
 
     for chat_id in subscribers:
         prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
-        chat_prefs[chat_id] = prefs
         if is_in_quiet_hours(prefs):
             continue
 
@@ -420,16 +440,32 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Single pass over users: decide who is due and group them by combo at
     # the same time. Loading prefs twice (once to test due-ness, once to
     # group) doubled the SQLite round-trips for every user, every hour.
+    #
+    # Each due user also claims a slot in the daily-digest ledger. This makes
+    # delivery exactly-once per local day even though the tick can fire twice
+    # inside the same hour (the job's `first=30s` boot run plus the regular
+    # run after a restart, or a DST fall-back hour).
+    now = datetime.now(UTC)
     grouped: dict[tuple[str, str], list[int]] = {}
     due_count = 0
+    skipped_duplicate = 0
     for chat_id in user_ids:
         prefs = await get_user_prefs(chat_id, DEFAULT_COUNTRY)
-        if not is_digest_due(prefs):
+        if not is_digest_due(prefs, now):
+            continue
+        if not await claim_daily_digest_slot(chat_id, digest_dedupe_key(prefs, now)):
+            skipped_duplicate += 1
             continue
         due_count += 1
         country = prefs.get("country", DEFAULT_COUNTRY)
         category = prefs.get("category", "general")
         grouped.setdefault((country, category), []).append(chat_id)
+
+    if skipped_duplicate:
+        logger.info(
+            "Skipped %s user(s) already delivered a digest for this local slot.",
+            skipped_duplicate,
+        )
 
     if not grouped:
         logger.info(
@@ -437,6 +473,10 @@ async def send_daily_news(context: ContextTypes.DEFAULT_TYPE) -> None:
             len(user_ids),
         )
         return
+
+    # Prune the delivery ledger before fetching so it cannot grow unbounded.
+    with contextlib.suppress(Exception):
+        await cleanup_old_daily_digests(BREAKING_ALERT_RETENTION_DAYS)
 
     logger.info(
         "Sending daily news to %s due subscriber(s)...",
